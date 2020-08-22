@@ -7,16 +7,19 @@ TMUX_WIN_ID=$1
 NAME=$2
 SEED=$3
 RPC_PORT=$4
-ENABLE_VOTING=$5
+USE_SPV=$5
+ENABLE_VOTING=$6
 
 WALLET_DIR="${NODES_ROOT}/${NAME}"
 mkdir -p ${WALLET_DIR}
 
 # Connect to alpha or beta node
-DCRD_RPC_PORT="19570"
+DCRD_SPV_PORT="19567"
+DCRD_RPC_PORT="19568"
 DCRD_RPC_CERT="${NODES_ROOT}/alpha/rpc.cert"
 if [ "${NAME}" = "beta" ]; then
-  DCRD_RPC_PORT="19569"
+  DCRD_SPV_PORT="19570"
+  DCRD_RPC_PORT="19571"
   DCRD_RPC_CERT="${NODES_ROOT}/beta/rpc.cert"
 fi
 
@@ -32,9 +35,19 @@ password=${RPC_PASS}
 rpclisten=127.0.0.1:${RPC_PORT}
 rpccert=${WALLET_DIR}/rpc.cert
 pass=${WALLET_PASS}
+EOF
+
+if [ "${USE_SPV}" = "1" ]; then
+  cat >> "${WALLET_DIR}/${NAME}.conf" <<EOF
+spvconnect=127.0.0.1:${DCRD_SPV_PORT}
+spv=1
+EOF
+else
+  cat >> "${WALLET_DIR}/${NAME}.conf" <<EOF
 rpcconnect=127.0.0.1:${DCRD_RPC_PORT}
 cafile=${DCRD_RPC_CERT}
 EOF
+fi
 
 if [ "${ENABLE_VOTING}" = "1" ]; then
   cat >> "${WALLET_DIR}/${NAME}.conf" <<EOF
