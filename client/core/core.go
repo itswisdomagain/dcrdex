@@ -1984,6 +1984,15 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 		coinIDs = append(coinIDs, []byte(coins[i].ID()))
 	}
 
+	// The coins selected for this order will need to be unlocked
+	// if the order does not get to the server successfully.
+	unlockCoins := func() {
+		err := fromWallet.ReturnCoins(coins)
+		if err != nil {
+			log.Warnf("Unable to return %s funding coins: %v", unbip(fromWallet.AssetID), err)
+		}
+	}
+
 	// Construct the order.
 	preImg := newPreimage()
 	prefix := &order.Prefix{
@@ -2025,11 +2034,13 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 	}
 	err = order.ValidateOrder(ord, order.OrderStatusEpoch, wallets.baseAsset.LotSize)
 	if err != nil {
+		unlockCoins()
 		return nil, 0, fmt.Errorf("ValidateOrder error: %w", err)
 	}
 
 	msgCoins, err := messageCoins(wallets.fromWallet, coins)
 	if err != nil {
+		unlockCoins()
 		return nil, 0, fmt.Errorf("wallet %v failed to sign coins: %w", wallets.fromAsset.ID, err)
 	}
 
@@ -2045,6 +2056,8 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 	result := new(msgjson.OrderResult)
 	err = dc.signAndRequest(msgOrder, route, result, DefaultResponseTimeout)
 	if err != nil {
+		// Do NOT unlock the coins because the request may have actually reached
+		// the server.
 		return nil, 0, fmt.Errorf("new order request with DEX server %v failed: %w", dc.acct.host, err)
 	}
 
@@ -2059,6 +2072,7 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 
 	err = validateOrderResponse(dc, result, ord, msgOrder)
 	if err != nil {
+		unlockCoins()
 		log.Errorf("Abandoning order. preimage: %x, server time: %d: %v",
 			preImg[:], result.ServerTime, err)
 		return nil, 0, fmt.Errorf("validateOrderResponse error: %w", err)
@@ -2078,6 +2092,7 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 	}
 	err = c.db.UpdateOrder(dbOrder)
 	if err != nil {
+		// Do NOT unlock the coins, they're already locked by server.
 		logAbandon(fmt.Sprintf("failed to store order in database: %v", err))
 		return nil, 0, fmt.Errorf("Order abandoned due to database error: %w", err)
 	}
