@@ -398,10 +398,10 @@ func (tdb *TDB) Backup() error {
 func (tdb *TDB) AckNotification(id []byte) error { return nil }
 
 type tCoin struct {
-	id       []byte
-	confs    uint32
-	confsErr error
-	val      uint64
+	id, redeem []byte
+	confs      uint32
+	confsErr   error
+	val        uint64
 }
 
 func (c *tCoin) ID() dex.Bytes {
@@ -418,6 +418,10 @@ func (c *tCoin) Value() uint64 {
 
 func (c *tCoin) Confirmations() (uint32, error) {
 	return c.confs, c.confsErr
+}
+
+func (c *tCoin) Redeem() dex.Bytes {
+	return c.redeem
 }
 
 type tReceipt struct {
@@ -471,33 +475,32 @@ func (ai *tAuditInfo) SecretHash() dex.Bytes {
 }
 
 type TXCWallet struct {
-	mtx               sync.RWMutex
-	payFeeCoin        *tCoin
-	payFeeErr         error
-	fundCoins         asset.Coins
-	fundRedeemScripts []dex.Bytes
-	fundErr           error
-	addrErr           error
-	signCoinErr       error
-	lastSwaps         *asset.Swaps
-	swapReceipts      []asset.Receipt
-	auditInfo         asset.AuditInfo
-	auditErr          error
-	refundCoin        dex.Bytes
-	refundErr         error
-	redeemCoins       []dex.Bytes
-	badSecret         bool
-	fundedVal         uint64
-	fundedSwaps       uint64
-	connectErr        error
-	unlockErr         error
-	balErr            error
-	bal               *asset.Balance
-	fundingCoins      asset.Coins
-	returnedCoins     asset.Coins
-	fundingCoinErr    error
-	lockErr           error
-	changeCoin        *tCoin
+	mtx            sync.RWMutex
+	payFeeCoin     *tCoin
+	payFeeErr      error
+	fundCoins      asset.OrderCoins
+	fundErr        error
+	addrErr        error
+	signCoinErr    error
+	lastSwaps      *asset.Swaps
+	swapReceipts   []asset.Receipt
+	auditInfo      asset.AuditInfo
+	auditErr       error
+	refundCoin     dex.Bytes
+	refundErr      error
+	redeemCoins    []dex.Bytes
+	badSecret      bool
+	fundedVal      uint64
+	fundedSwaps    uint64
+	connectErr     error
+	unlockErr      error
+	balErr         error
+	bal            *asset.Balance
+	fundingCoins   asset.Coins
+	returnedCoins  asset.Coins
+	fundingCoinErr error
+	lockErr        error
+	changeCoin     *tCoin
 }
 
 func newTWallet(assetID uint32) (*xcWallet, *TXCWallet) {
@@ -538,10 +541,10 @@ func (w *TXCWallet) FeeRate() (uint64, error) {
 	return 24, nil
 }
 
-func (w *TXCWallet) FundOrder(ord *asset.Order) (asset.Coins, []dex.Bytes, error) {
+func (w *TXCWallet) FundOrder(ord *asset.Order) (asset.OrderCoins, error) {
 	w.fundedVal = ord.Value
 	w.fundedSwaps = ord.MaxSwapCount
-	return w.fundCoins, w.fundRedeemScripts, w.fundErr
+	return w.fundCoins, w.fundErr
 }
 
 func (w *TXCWallet) ReturnCoins(coins asset.Coins) error {
@@ -1824,16 +1827,14 @@ func TestTrade(t *testing.T) {
 		id:  encode.RandomBytes(36),
 		val: qty * 2,
 	}
-	tDcrWallet.fundCoins = asset.Coins{dcrCoin}
-	tDcrWallet.fundRedeemScripts = []dex.Bytes{nil}
+	tDcrWallet.fundCoins = asset.OrderCoins{dcrCoin}
 
 	btcVal := calc.BaseToQuote(rate, qty*2)
 	btcCoin := &tCoin{
 		id:  encode.RandomBytes(36),
 		val: btcVal,
 	}
-	tBtcWallet.fundCoins = asset.Coins{btcCoin}
-	tBtcWallet.fundRedeemScripts = []dex.Bytes{nil}
+	tBtcWallet.fundCoins = asset.OrderCoins{btcCoin}
 
 	book := newBookie(func() {})
 	rig.dc.books[tDcrBtcMktName] = book

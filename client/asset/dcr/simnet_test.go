@@ -200,22 +200,51 @@ func runTest(t *testing.T, splitTx bool) {
 		ord.MaxSwapCount = v / tDCR.LotSize
 	}
 
+	fundOrder := func(o *asset.Order) (asset.Coins, error) {
+		beforeBal, err := rig.beta().Balance()
+		if err != nil {
+			t.Fatalf("error getting beta balance: %v", err)
+		}
+
+		orderCoins, err := rig.beta().FundOrder(o)
+		if err != nil {
+			return nil, err
+		}
+		utxos := make(asset.Coins, len(orderCoins))
+		var totalSelected uint64
+		for i, coin := range orderCoins {
+			utxos[i] = coin
+			totalSelected += coin.Value()
+		}
+
+		afterBal, err := rig.beta().Balance()
+		if err != nil {
+			t.Fatalf("error getting beta balance: %v", err)
+		}
+		if afterBal.Locked != beforeBal.Locked+totalSelected {
+			tLogger.Warnf("Inconsistent locked balance: before funding %d, after funding %d, diff %d, expected %d",
+				beforeBal.Locked, afterBal.Locked, afterBal.Locked-beforeBal.Locked, totalSelected)
+		}
+
+		return utxos, nil
+	}
+
 	// Grab some coins.
-	utxos, _, err := rig.beta().FundOrder(ord)
+	utxos, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("Funding error: %v", err)
 	}
 	utxo := utxos[0]
 
 	// Coins should be locked
-	utxos, _, _ = rig.beta().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	if !splitTx && inUTXOs(utxo, utxos) {
 		t.Fatalf("received locked output")
 	}
 	rig.beta().ReturnCoins([]asset.Coin{utxo})
 	rig.beta().ReturnCoins(utxos)
 	// Make sure we get the first utxo back with Fund.
-	utxos, _, _ = rig.beta().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	if !splitTx && !inUTXOs(utxo, utxos) {
 		t.Fatalf("unlocked output not returned")
 	}
@@ -229,13 +258,13 @@ func runTest(t *testing.T, splitTx bool) {
 
 	// Get a separate set of UTXOs for each contract.
 	setOrderValue(contractValue)
-	utxos1, _, err := rig.beta().FundOrder(ord)
+	utxos1, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding first contract: %v", err)
 	}
 	// Get a separate set of UTXOs for each contract.
 	setOrderValue(contractValue * 2)
-	utxos2, _, err := rig.beta().FundOrder(ord)
+	utxos2, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding second contract: %v", err)
 	}
@@ -300,7 +329,7 @@ func runTest(t *testing.T, splitTx bool) {
 		swapOutput := receipt.Coin()
 		ci, err := rig.alpha().AuditContract(swapOutput.ID(), receipt.Contract())
 		if err != nil {
-			t.Fatalf("error auditing contract: %v", err)
+			t.Fatalf("error auditing contract %s: %v", swapOutput.String(), err)
 		}
 		swapOutput = ci.Coin()
 		if ci.Recipient() != alphaAddress {
@@ -376,7 +405,7 @@ func runTest(t *testing.T, splitTx bool) {
 
 	// Have beta send a swap contract to the alpha address.
 	setOrderValue(contractValue)
-	utxos, _, _ = rig.beta().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	contract := &asset.Contract{
 		Address:    alphaAddress,
 		Value:      contractValue,

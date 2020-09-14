@@ -566,6 +566,75 @@ func TestTrade(t *testing.T) {
 	if !bytes.Equal(b, qty) {
 		t.Fatal(b, qty)
 	}
+
+	tradeB, err := json.Marshal(trade)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	tradeBack := new(Trade)
+	err = json.Unmarshal(tradeB, tradeBack)
+	if err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if tradeBack.Side != trade.Side {
+		t.Fatal(tradeBack.Side, trade.Side)
+	}
+	if tradeBack.Quantity != trade.Quantity {
+		t.Fatal(tradeBack.Quantity, trade.Quantity)
+	}
+	if tradeBack.Address != trade.Address {
+		t.Fatal(tradeBack.Address, trade.Address)
+	}
+	if len(tradeBack.Coins) != len(trade.Coins) {
+		t.Fatalf("wrong number of coins. expected %d got %d", len(trade.Coins), len(tradeBack.Coins))
+	}
+	if !bytes.Equal(tradeBack.Coins[0].ID, trade.Coins[0].ID) {
+		t.Fatalf("coin id mismatch: %v != %v", tradeBack.Coins[0].ID, trade.Coins[0].ID)
+	}
+	if !bytes.Equal(tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem) {
+		t.Fatalf("coin redeem mismatch: %v != %v", tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem)
+	}
+
+	// Marshal nil redeem bytes.
+	trade.Coins[0].Redeem = nil
+	tradeB, err = json.Marshal(trade)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	tradeBack = new(Trade)
+	err = json.Unmarshal(tradeB, tradeBack)
+	if err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(tradeBack.Coins) != len(trade.Coins) {
+		t.Fatalf("wrong number of coins. expected %d got %d", len(trade.Coins), len(tradeBack.Coins))
+	}
+	if !bytes.Equal(tradeBack.Coins[0].ID, trade.Coins[0].ID) {
+		t.Fatalf("coin id mismatch: %v != %v", tradeBack.Coins[0].ID, trade.Coins[0].ID)
+	}
+	if !bytes.Equal(tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem) {
+		t.Fatalf("coin redeem mismatch: %v != %v", tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem)
+	}
+
+	// Marshal empty non-nil redeem bytes.
+	trade.Coins[0].Redeem = []byte{}
+	tradeB, err = json.Marshal(trade)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	err = json.Unmarshal(tradeB, tradeBack)
+	if err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if len(tradeBack.Coins) != len(trade.Coins) {
+		t.Fatalf("wrong number of coins. expected %d got %d", len(trade.Coins), len(tradeBack.Coins))
+	}
+	if !bytes.Equal(tradeBack.Coins[0].ID, trade.Coins[0].ID) {
+		t.Fatalf("coin id mismatch: %v != %v", tradeBack.Coins[0].ID, trade.Coins[0].ID)
+	}
+	if !bytes.Equal(tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem) {
+		t.Fatalf("coin redeem mismatch: %v != %v", tradeBack.Coins[0].Redeem, trade.Coins[0].Redeem)
+	}
 }
 
 func TestLimit(t *testing.T) {

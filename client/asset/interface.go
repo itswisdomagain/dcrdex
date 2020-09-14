@@ -71,16 +71,15 @@ type Wallet interface {
 	Balance() (*Balance, error)
 	// FundOrder selects coins for use in an order. The coins will be locked,
 	// and will not be returned in subsequent calls to FundOrder or calculated
-	// in calls to Available, unless they are unlocked with ReturnCoins. The
-	// returned []dex.Bytes contains the redeem scripts for the selected coins.
-	// Equal number of coins and redeemed scripts must be returned. A nil or
-	// empty dex.Bytes should be appended to the redeem scripts collection for
-	// coins with no redeem script.
-	FundOrder(*Order) (coins Coins, redeemScripts []dex.Bytes, err error)
+	// in calls to Available, unless they are unlocked with ReturnCoins.
+	FundOrder(*Order) (OrderCoins, error)
 	// ReturnCoins unlocks coins. This would be necessary in the case of a
 	// canceled order.
 	ReturnCoins(Coins) error
-	// FundingCoins gets funding coins for the coin IDs. The coins are locked.
+	// FundingCoins gets funding coins for the coin IDs. Any redeem scripts
+	// required to spend the coins are not returned. The coins are locked if
+	// found to be unlocked. An error is returned if any of the coins can not
+	// be found or if some were unlocked and could not be locked.
 	// This method might be called to reinitialize an order from data stored
 	// externally. This method will only return funding coins, e.g. unspent
 	// transaction outputs.
@@ -178,8 +177,21 @@ type Coin interface {
 	Confirmations() (uint32, error)
 }
 
-// Coins a collection of coins as returned by Fund.
+// Coins is a collection of coins.
 type Coins []Coin
+
+// OrderCoin is some amount of spendable asset that can be used to fund an
+// order. OrderCoin extends Coin, including where necessary, the redeem script
+// required to spend the coin.
+type OrderCoin interface {
+	Coin
+	// Redeem is any redeem script required to spend the coin.
+	Redeem() dex.Bytes
+}
+
+// OrderCoins is a collection of coins that can be used to fund an order as
+// returned by FundOrder.
+type OrderCoins []OrderCoin
 
 // Receipt holds information about a sent swap contract.
 type Receipt interface {

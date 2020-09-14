@@ -600,7 +600,7 @@ func TestAvailableFund(t *testing.T) {
 	}
 
 	// Zero value
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no funding error for zero value")
 	}
@@ -608,7 +608,7 @@ func TestAvailableFund(t *testing.T) {
 	// Nothing to spend
 	node.unspent = nil
 	setOrderValue(littleOrder)
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error for zero utxos")
 	}
@@ -616,7 +616,7 @@ func TestAvailableFund(t *testing.T) {
 
 	// RPC error
 	node.unspentErr = tErr
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no funding error for rpc error")
 	}
@@ -624,14 +624,14 @@ func TestAvailableFund(t *testing.T) {
 
 	// Negative response when locking outputs.
 	node.lockUnspentErr = tErr
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error for lockunspent result = false: %v", err)
 	}
 	node.lockUnspentErr = nil
 
 	// Fund a little bit, but small output is unconfirmed.
-	spendables, _, err := wallet.FundOrder(ord)
+	spendables, err := wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding small amount: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestAvailableFund(t *testing.T) {
 
 	// Now confirm the little bit and have it selected.
 	unspents[0].Confirmations++
-	spendables, _, err = wallet.FundOrder(ord)
+	spendables, err = wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding small amount: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestAvailableFund(t *testing.T) {
 
 	// Fund a lotta bit.
 	setOrderValue(lottaOrder)
-	spendables, _, err = wallet.FundOrder(ord)
+	spendables, err = wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding large amount: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestAvailableFund(t *testing.T) {
 	wallet.useSplitTx = true
 	// No split performed due to economics is not an error.
 	setOrderValue(extraLottaOrder)
-	coins, _, err := wallet.FundOrder(ord)
+	coins, err := wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error for no-split split: %v", err)
 	}
@@ -689,10 +689,11 @@ func TestAvailableFund(t *testing.T) {
 	}
 
 	// Not enough to cover transaction fees.
-	tweak := float64(littleFunds+lottaFunds-calc.RequiredOrderFunds(extraLottaOrder, 2*dexdcr.P2PKHInputSize, extraLottaLots, tDCR)+1) / 1e8
+	reqFunds := calc.RequiredOrderFunds(extraLottaOrder, 2*dexdcr.P2PKHInputSize, extraLottaLots, tDCR)
+	tweak := float64(littleFunds+lottaFunds-reqFunds+1) / 1e8
 	node.unspent[0].Amount -= tweak
 	setOrderValue(extraLottaOrder)
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error when not enough to cover tx fees")
 	}
@@ -700,7 +701,7 @@ func TestAvailableFund(t *testing.T) {
 
 	// No split because not standing order.
 	ord.Immediate = true
-	coins, _, err = wallet.FundOrder(ord)
+	coins, err = wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error for no-split split: %v", err)
 	}
@@ -711,11 +712,10 @@ func TestAvailableFund(t *testing.T) {
 
 	// With a little more locked, the split should be performed.
 	node.unspent[1].Amount += float64(baggageFees) / 1e8
-	coins, _, err = wallet.FundOrder(ord)
+	coins, err = wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("error for split tx: %v", err)
 	}
-
 	// Should be just one coin.
 	if len(coins) != 1 {
 		t.Fatalf("split failed - coin count != 1")
@@ -724,11 +724,15 @@ func TestAvailableFund(t *testing.T) {
 		t.Fatalf("split failed - no tx sent")
 	}
 
+	// Clear the coins spent in the split tx so they can be reused.
+	splitCoin := coins[0].(*compositeUTXO)
+	delete(wallet.splitTxInputs, splitCoin.pt)
+
 	// Hit some error paths.
 
 	// GetRawChangeAddress error
 	node.changeAddrErr = tErr
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error for split tx change addr error")
 	}
@@ -736,22 +740,22 @@ func TestAvailableFund(t *testing.T) {
 
 	// SendRawTx error
 	node.sendRawErr = tErr
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error for split tx send error")
 	}
 	node.sendRawErr = nil
 
 	// Success again.
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err != nil {
-		t.Fatalf("error for split tx recovery run")
+		t.Fatalf("error for split tx recovery run: %v", err)
 	}
 
 	// Not enough funds, because littleUnspent is a different account.
 	unspents[0].Account = "wrong account"
 	setOrderValue(extraLottaOrder)
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error for wrong account")
 	}
@@ -867,7 +871,7 @@ func TestFundingCoins(t *testing.T) {
 	node.unspent = nil
 	opID := newOutPoint(tTxHash, vout)
 	wallet.fundingCoins[opID] = &fundingCoin{
-		op: newOutput(node, tTxHash, vout, 0, 0),
+		output: newOutput(node, tTxHash, vout, 0, 0),
 	}
 	ensureGood()
 
@@ -934,14 +938,14 @@ func TestFundEdges(t *testing.T) {
 		MaxSwapCount: lots,
 		DEXConfig:    tDCR,
 	}
-	_, _, err := wallet.FundOrder(ord)
+	_, err := wallet.FundOrder(ord)
 	if err == nil {
 		t.Fatalf("no error when not enough funds in single p2pkh utxo")
 	}
 	// Now add the needed atoms and try again.
 	p2pkhUnspent.Amount = float64(swapVal+fees) / 1e8
 	node.unspent = []walletjson.ListUnspentResult{p2pkhUnspent}
-	_, _, err = wallet.FundOrder(ord)
+	_, err = wallet.FundOrder(ord)
 	if err != nil {
 		t.Fatalf("should be enough to fund with a single p2pkh utxo: %v", err)
 	}
@@ -1108,7 +1112,6 @@ type TAuditInfo struct{}
 func (ai *TAuditInfo) Recipient() string     { return tPKHAddr.String() }
 func (ai *TAuditInfo) Expiration() time.Time { return time.Time{} }
 func (ai *TAuditInfo) Coin() asset.Coin      { return &tCoin{} }
-func (ai *TAuditInfo) Contract() dex.Bytes   { return nil }
 func (ai *TAuditInfo) SecretHash() dex.Bytes { return nil }
 
 func TestRedeem(t *testing.T) {
@@ -1258,7 +1261,7 @@ func TestSignMessage(t *testing.T) {
 	op := newOutput(node, tTxHash, vout, 5e7, wire.TxTreeRegular)
 
 	wallet.fundingCoins[op.pt] = &fundingCoin{
-		addr: tPKHAddr.String(),
+		address: tPKHAddr.String(),
 	}
 
 	check := func() {
@@ -1334,8 +1337,8 @@ func TestAuditContract(t *testing.T) {
 	if audit.Recipient() != addrStr {
 		t.Fatalf("wrong recipient. wanted '%s', got '%s'", addrStr, audit.Recipient())
 	}
-	if !bytes.Equal(audit.Contract(), contract) {
-		t.Fatalf("contract not set to coin redeem script")
+	if !bytes.Equal(audit.SecretHash(), secretHash) {
+		t.Fatalf("wrong secret hash. wanted %s, got %x", audit.SecretHash(), secretHash)
 	}
 	if audit.Expiration().Equal(lockTime) {
 		t.Fatalf("wrong lock time. wanted %d, got %d", lockTime.Unix(), audit.Expiration().Unix())
@@ -1371,9 +1374,10 @@ type tReceipt struct {
 	expiration uint64
 }
 
-func (r *tReceipt) Expiration() time.Time { return time.Unix(int64(r.expiration), 0).UTC() }
-func (r *tReceipt) Coin() asset.Coin      { return r.coin }
-func (r *tReceipt) Contract() dex.Bytes   { return r.contract }
+func (r *tReceipt) Expiration() time.Time  { return time.Unix(int64(r.expiration), 0).UTC() }
+func (r *tReceipt) Coin() asset.Coin       { return r.coin }
+func (ai *TAuditInfo) Contract() dex.Bytes { return nil }
+func (r *tReceipt) Contract() dex.Bytes    { return r.contract }
 
 func TestFindRedemption(t *testing.T) {
 	wallet, node, shutdown := tNewWallet()

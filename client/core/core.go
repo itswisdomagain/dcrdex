@@ -2042,7 +2042,7 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 			qty, wallets.baseAsset.Symbol, rate, wallets.baseAsset.LotSize)
 	}
 
-	coins, redeemScripts, err := fromWallet.FundOrder(&asset.Order{
+	orderCoins, err := fromWallet.FundOrder(&asset.Order{
 		Value:        fundQty,
 		MaxSwapCount: lots,
 		DEXConfig:    wallets.fromAsset,
@@ -2051,8 +2051,10 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 	if err != nil {
 		return nil, 0, fmt.Errorf("FundOrder error for %s, funding quantity %d (%d lots): %w", wallets.fromAsset.Symbol, fundQty, lots, err)
 	}
+	coins := make(asset.Coins, 0, len(orderCoins))
 	coinIDs := make([]order.CoinID, 0, len(coins))
-	for i := range coins {
+	for i := range orderCoins {
+		coins = append(coins, orderCoins[i])
 		coinIDs = append(coinIDs, []byte(coins[i].ID()))
 	}
 
@@ -2110,7 +2112,7 @@ func (c *Core) prepareTrackedTrade(dc *dexConnection, form *TradeForm, crypter e
 		return nil, 0, fmt.Errorf("ValidateOrder error: %w", err)
 	}
 
-	msgCoins, err := messageCoins(wallets.fromWallet, coins, redeemScripts)
+	msgCoins, err := messageCoins(wallets.fromWallet, orderCoins)
 	if err != nil {
 		unlockCoins()
 		return nil, 0, fmt.Errorf("wallet %v failed to sign coins: %w", wallets.fromAsset.ID, err)
@@ -3672,11 +3674,11 @@ func messageTrade(trade *order.Trade, coins []*msgjson.Coin) *msgjson.Trade {
 	}
 }
 
-// messageCoin converts the []asset.Coin to a []*msgjson.Coin, signing the coin
-// IDs and retrieving the pubkeys too.
-func messageCoins(wallet *xcWallet, coins asset.Coins, redeemScripts []dex.Bytes) ([]*msgjson.Coin, error) {
+// messageCoin converts the []asset.OrderCoin to a []*msgjson.Coin, signing the
+// coin IDs and retrieving the pubkeys too.
+func messageCoins(wallet *xcWallet, coins asset.OrderCoins) ([]*msgjson.Coin, error) {
 	msgCoins := make([]*msgjson.Coin, 0, len(coins))
-	for i, coin := range coins {
+	for _, coin := range coins {
 		coinID := coin.ID()
 		pubKeys, sigs, err := wallet.SignMessage(coin, coinID)
 		if err != nil {
@@ -3686,7 +3688,7 @@ func messageCoins(wallet *xcWallet, coins asset.Coins, redeemScripts []dex.Bytes
 			ID:      coinID,
 			PubKeys: pubKeys,
 			Sigs:    sigs,
-			Redeem:  redeemScripts[i],
+			Redeem:  coin.Redeem(),
 		})
 	}
 	return msgCoins, nil

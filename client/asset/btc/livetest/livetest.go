@@ -180,22 +180,33 @@ func Run(t *testing.T, newWallet WalletConstructor, address string, dexAsset *de
 
 	// Gamma should only have 10 BTC utxos, so calling fund for less should only
 	// return 1 utxo.
+	fundOrder := func(o *asset.Order) (asset.Coins, error) {
+		orderCoins, err := rig.gamma().FundOrder(o)
+		if err != nil {
+			return nil, err
+		}
+		utxos := make(asset.Coins, len(orderCoins))
+		for i, coin := range orderCoins {
+			utxos[i] = coin
+		}
+		return utxos, nil
+	}
 
-	utxos, _, err := rig.gamma().FundOrder(ord)
+	utxos, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("Funding error: %v", err)
 	}
 	utxo := utxos[0]
 
 	// UTXOs should be locked
-	utxos, _, _ = rig.gamma().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	if inUTXOs(utxo, utxos) {
 		t.Fatalf("received locked output")
 	}
 	rig.gamma().ReturnCoins([]asset.Coin{utxo})
 	rig.gamma().ReturnCoins(utxos)
 	// Make sure we get the first utxo back with Fund.
-	utxos, _, _ = rig.gamma().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	if !splitTx && !inUTXOs(utxo, utxos) {
 		t.Fatalf("unlocked output not returned")
 	}
@@ -203,13 +214,13 @@ func Run(t *testing.T, newWallet WalletConstructor, address string, dexAsset *de
 
 	// Get a separate set of UTXOs for each contract.
 	setOrderValue(contractValue)
-	utxos1, _, err := rig.gamma().FundOrder(ord)
+	utxos1, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding first contract: %v", err)
 	}
 	// Get a separate set of UTXOs for each contract.
 	setOrderValue(contractValue * 2)
-	utxos2, _, err := rig.gamma().FundOrder(ord)
+	utxos2, err := fundOrder(ord)
 	if err != nil {
 		t.Fatalf("error funding second contract: %v", err)
 	}
@@ -339,7 +350,7 @@ func Run(t *testing.T, newWallet WalletConstructor, address string, dexAsset *de
 
 	// Have gamma send a swap contract to the alpha address.
 	setOrderValue(contractValue)
-	utxos, _, _ = rig.gamma().FundOrder(ord)
+	utxos, _ = fundOrder(ord)
 	contract := &asset.Contract{
 		Address:    address,
 		Value:      contractValue,
