@@ -56,6 +56,7 @@ type WalletConfig struct {
 	// needed. If the error is non-nil, the wallet monitoring loop encountered an
 	// error while retrieving tip information.
 	TipChange func(error)
+	Locked    func()
 }
 
 // Wallet is a common interface to be implemented by cryptocurrency wallet

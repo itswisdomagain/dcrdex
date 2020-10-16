@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"decred.org/dcrdex/client/asset"
@@ -119,6 +120,7 @@ type rpcClient interface {
 	GetBestBlockHash() (*chainhash.Hash, error)
 	GetRawMempool() ([]*chainhash.Hash, error)
 	GetRawTransactionVerbose(txHash *chainhash.Hash) (*btcjson.TxRawResult, error)
+	GetInfo() (*btcjson.InfoWalletResult, error)
 	RawRequest(method string, params []json.RawMessage) (json.RawMessage, error)
 }
 
@@ -327,8 +329,10 @@ type ExchangeWallet struct {
 	walletInfo        *asset.WalletInfo
 	chainParams       *chaincfg.Params
 	log               dex.Logger
+	connCount         uint32
 	symbol            string
 	tipChange         func(error)
+	locked            func()
 	minNetworkVersion uint64
 	fallbackFeeRate   uint64
 	useSplitTx        bool
@@ -414,25 +418,53 @@ func BTCCloneWallet(cfg *BTCCloneCFG) (*ExchangeWallet, error) {
 	endpoint := btcCfg.RPCBind + "/wallet/" + cfg.WalletCFG.Settings["walletname"]
 	cfg.Logger.Infof("Setting up new %s wallet at %s.", cfg.Symbol, endpoint)
 
-	client, err := rpcclient.New(&rpcclient.ConnConfig{
-		HTTPPostMode: true,
-		DisableTLS:   true,
-		Host:         endpoint,
-		User:         btcCfg.RPCUser,
-		Pass:         btcCfg.RPCPass,
-	}, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating BTC RPC client: %v", err)
+	btc := newWallet(cfg, btcCfg)
+
+	nodeNtfnHandlers := &rpcclient.NotificationHandlers{
+		OnClientConnected: func() {
+			if atomic.AddUint32(&btc.connCount, 1) == 1 {
+				// first connection attempt, only check wallet lock state on reconnects
+				return
+			}
+			btc.log.Debug("reconnected to wallet backend")
+			walletInfo, err := btc.node.GetInfo()
+			if err != nil {
+				btc.log.Errorf("GetInfo error: %v", err)
+				return
+			}
+			lockTime := time.Unix(walletInfo.UnlockedUntil, 0)
+			if lockTime.Before(time.Now()) {
+				btc.locked()
+			}
+		},
+		OnWalletLockState: func(locked bool) {
+			if locked {
+				btc.log.Debugf("%s wallet is locked", WalletInfo.Name)
+				btc.locked()
+			}
+		},
 	}
 
-	btc := newWallet(cfg, btcCfg, client)
-	btc.client = client
+	btc.client, err = rpcclient.New(&rpcclient.ConnConfig{
+		HTTPPostMode:        false,
+		DisableTLS:          true,
+		Host:                endpoint,
+		User:                btcCfg.RPCUser,
+		Pass:                btcCfg.RPCPass,
+		DisableConnectOnNew: true,
+	}, nodeNtfnHandlers)
+	if err != nil {
+		return nil, fmt.Errorf("error creating %s RPC client: %v", btc.symbol, err)
+	}
+
+	btc.node = btc.client
+	btc.wallet = newWalletClient(btc.node, btc.chainParams)
 
 	return btc, nil
 }
 
 // newWallet creates the ExchangeWallet and starts the block monitor.
-func newWallet(cfg *BTCCloneCFG, btcCfg *dexbtc.Config, node rpcClient) *ExchangeWallet {
+func newWallet(cfg *BTCCloneCFG, btcCfg *dexbtc.Config) *ExchangeWallet {
 
 	// If set in the user config, the fallback fee will be in conventional units
 	// per kB, e.g. BTC/kB. Translate that to sats/B.
@@ -443,12 +475,11 @@ func newWallet(cfg *BTCCloneCFG, btcCfg *dexbtc.Config, node rpcClient) *Exchang
 	cfg.Logger.Tracef("fallback fees set at %d %s/byte", fallbackFeesPerByte, cfg.WalletInfo.Units)
 
 	return &ExchangeWallet{
-		node:                node,
-		wallet:              newWalletClient(node, cfg.ChainParams),
 		symbol:              cfg.Symbol,
 		chainParams:         cfg.ChainParams,
 		log:                 cfg.Logger,
 		tipChange:           cfg.WalletCFG.TipChange,
+		locked:              cfg.WalletCFG.Locked,
 		fundingCoins:        make(map[outPoint]*utxo),
 		findRedemptionQueue: make(map[outPoint]*findRedemptionReq),
 		minNetworkVersion:   cfg.MinNetworkVersion,
@@ -469,6 +500,12 @@ func (btc *ExchangeWallet) Info() *asset.WalletInfo {
 // Connect connects the wallet to the RPC server. Satisfies the dex.Connector
 // interface.
 func (btc *ExchangeWallet) Connect(ctx context.Context) (*sync.WaitGroup, error) {
+	err := btc.client.Connect(1)
+	if err != nil {
+		btc.log.Errorf("Connect error: %v", err)
+		return nil, fmt.Errorf("%s wallet connect error: %v", btc.symbol, err)
+	}
+
 	// Check the version. Do it here, so we can also diagnose a bad connection.
 	netVer, codeVer, err := btc.getVersion()
 	if err != nil {
@@ -511,6 +548,12 @@ func (btc *ExchangeWallet) shutdown() {
 		delete(btc.findRedemptionQueue, contractOutpoint)
 	}
 	btc.findRedemptionMtx.Unlock()
+
+	// Shut down the rpcclient.Client.
+	if btc.client != nil {
+		btc.client.Shutdown()
+		btc.client.WaitForShutdown()
+	}
 }
 
 // Balance returns the total available funds in the wallet. Part of the

@@ -59,6 +59,7 @@ func (w *xcWallet) Lock() error {
 }
 
 // unlocked will return true if the lockTime has not passed.
+// TODO: synchronize with wallet.
 func (w *xcWallet) unlocked() bool {
 	if len(w.encPW) == 0 {
 		return true

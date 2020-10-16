@@ -1253,6 +1253,9 @@ func (c *Core) loadWallet(dbWallet *db.Wallet) (*xcWallet, error) {
 		TipChange: func(err error) {
 			c.tipChange(dbWallet.AssetID, err)
 		},
+		Locked: func() {
+			c.walletLocked(dbWallet.AssetID)
+		},
 	}
 	logger := c.log.SubLogger(unbip(dbWallet.AssetID))
 	w, err := asset.Setup(dbWallet.AssetID, walletCfg, logger, c.net)
@@ -2880,7 +2883,7 @@ func (c *Core) dbTrackers(dc *dexConnection) (map[order.OrderID]*trackedTrade, e
 	if err != nil {
 		return nil, fmt.Errorf("database error when fetching orders for %s: %v", dc.acct.host, err)
 	}
-	c.log.Infof("Loaded %d active orders.", len(dbOrders))
+	c.log.Infof("Loaded %d active orders.", len(dbOrders)) // TODO this might include cancels, producing a wrong count
 
 	// It's possible for an order to not be active, but still have active matches.
 	// Grab the orders for those too.
@@ -3030,6 +3033,8 @@ func (c *Core) loadDBTrades(dc *dexConnection, crypter encrypt.Crypter, failed m
 				}
 			}
 		}
+		// TODO: These wallets may become unlocked at a later time, maybe
+		// don't ditch the trades just yet?
 		if baseFailed {
 			errs.add("could not complete order %s because the wallet for %s cannot be used", trade.token(), unbip(base))
 			continue
@@ -3976,6 +3981,35 @@ func (c *Core) tipChange(assetID uint32, nodeErr error) {
 	// status changes.
 	assets.count(assetID)
 	c.updateBalances(assets)
+}
+
+// walletLocked is called by a wallet backend when the wallet becomes locked,
+// either on reconnection or due to unlock timeout expiry or manual locking by
+// the user. If any active trade requires the wallet to be unlocked, the user
+// is notified to unlock the wallet.
+// TODO: Consider ways to unlock the wallet right away without requiring user
+// intervention, to prevent trades from failing because of the wallet remaining
+// locked.
+func (c *Core) walletLocked(assetID uint32) {
+	// Set the wallet as locked in core.
+	lockedWallet, err := c.connectedWallet(assetID)
+	if err != nil {
+		c.log.Errorf("%d wallet not connected: %v", assetID, err)
+	} else {
+		lockedWallet.lockTime = time.Now() // prevents placing trades with this wallet until unlocked
+	}
+
+	c.connMtx.RLock()
+	for _, dc := range c.conns {
+		if dc.hasActiveAssetOrders(assetID) {
+			walletSymbol := unbip(assetID)
+			unlockPrompt := fmt.Sprintf("Unlock your %s wallet!!", walletSymbol)
+			details := fmt.Sprintf("Your %s wallet MUST be unlocked to prevent trades from failing.", walletSymbol)
+			c.notify(newWalletConfigNote(unlockPrompt, details, db.ErrorLevel, lockedWallet.state())) // TODO: lockedWallet may be nil
+			break                                                                                     // skip checking other DEXs
+		}
+	}
+	c.connMtx.RUnlock()
 }
 
 // PromptShutdown asks confirmation to shutdown the dexc when has active orders.

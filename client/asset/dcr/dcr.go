@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"decred.org/dcrdex/client/asset"
@@ -131,6 +132,7 @@ type rpcClient interface {
 	GetNewAddressGapPolicy(string, rpcclient.GapPolicy, dcrutil.AddressParams) (dcrutil.Address, error)
 	DumpPrivKey(address dcrutil.Address, net [2]byte) (*dcrutil.WIF, error)
 	GetTransaction(txHash *chainhash.Hash) (*walletjson.GetTransactionResult, error)
+	WalletInfo() (*walletjson.WalletInfoResult, error)
 	WalletLock() error
 	WalletPassphrase(passphrase string, timeoutSecs int64) error
 	Disconnected() bool
@@ -338,7 +340,9 @@ type ExchangeWallet struct {
 	node            rpcClient
 	log             dex.Logger
 	acct            string
+	connCount       uint32
 	tipChange       func(error)
+	locked          func()
 	fallbackFeeRate uint64
 	useSplitTx      bool
 
@@ -389,14 +393,39 @@ func NewWallet(cfg *asset.WalletConfig, logger dex.Logger, network dex.Network) 
 
 	dcr := unconnectedWallet(cfg, walletCfg, logger)
 
+	nodeNtfnHandlers := &rpcclient.NotificationHandlers{
+		OnClientConnected: func() {
+			if atomic.AddUint32(&dcr.connCount, 1) == 1 {
+				// first connection attempt, only check wallet lock state on reconnects
+				return
+			}
+			dcr.log.Debug("reconnected to wallet backend")
+			walletInfo, err := dcr.node.WalletInfo()
+			if err != nil {
+				dcr.log.Errorf("WalletInfo error: %v", err)
+				return
+			}
+			if !walletInfo.Unlocked {
+				dcr.locked()
+			}
+		},
+		OnWalletLockState: func(locked bool) {
+			if locked {
+				dcr.log.Debugf("%s wallet is locked", WalletInfo.Name)
+				dcr.locked()
+			}
+		},
+	}
+
 	logger.Infof("Setting up new DCR wallet at %s with TLS certificate %q.",
 		walletCfg.RPCListen, walletCfg.RPCCert)
 	dcr.client, err = newClient(walletCfg.RPCListen, walletCfg.RPCUser,
-		walletCfg.RPCPass, walletCfg.RPCCert)
+		walletCfg.RPCPass, walletCfg.RPCCert, nodeNtfnHandlers)
 	if err != nil {
-		return nil, fmt.Errorf("DCR ExchangeWallet.Run error: %v", err)
+		return nil, fmt.Errorf("error creating DCR RPC client: %v", err)
 	}
 	// Beyond this point, only node
+	// TODO: dcr.client used at other points, client-node separation necessary??
 	dcr.node = dcr.client
 
 	return dcr, nil
@@ -417,6 +446,7 @@ func unconnectedWallet(cfg *asset.WalletConfig, dcrCfg *Config, logger dex.Logge
 		log:                 logger,
 		acct:                cfg.Settings["account"],
 		tipChange:           cfg.TipChange,
+		locked:              cfg.Locked,
 		fundingCoins:        make(map[outPoint]*fundingCoin),
 		findRedemptionQueue: make(map[outPoint]*findRedemptionReq),
 		fallbackFeeRate:     fallbackFeesPerByte,
@@ -426,7 +456,7 @@ func unconnectedWallet(cfg *asset.WalletConfig, dcrCfg *Config, logger dex.Logge
 
 // newClient attempts to create a new websocket connection to a dcrwallet
 // instance with the given credentials and notification handlers.
-func newClient(host, user, pass, cert string) (*rpcclient.Client, error) {
+func newClient(host, user, pass, cert string, ntfnHandlers *rpcclient.NotificationHandlers) (*rpcclient.Client, error) {
 
 	certs, err := ioutil.ReadFile(cert)
 	if err != nil {
@@ -442,7 +472,7 @@ func newClient(host, user, pass, cert string) (*rpcclient.Client, error) {
 		DisableConnectOnNew: true,
 	}
 
-	cl, err := rpcclient.New(config, nil)
+	cl, err := rpcclient.New(config, ntfnHandlers)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to start dcrwallet RPC client: %v", err)
 	}
@@ -460,7 +490,7 @@ func (dcr *ExchangeWallet) Info() *asset.WalletInfo {
 func (dcr *ExchangeWallet) Connect(ctx context.Context) (*sync.WaitGroup, error) {
 	err := dcr.client.Connect(ctx, false)
 	if err != nil {
-		return nil, fmt.Errorf("Decred Wallet connect error: %v", err)
+		return nil, fmt.Errorf("DCR Wallet connect error: %v", err)
 	}
 
 	// Check the required API versions.
