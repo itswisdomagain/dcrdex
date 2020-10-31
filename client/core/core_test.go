@@ -657,7 +657,7 @@ func (w *TXCWallet) SignMessage(asset.Coin, dex.Bytes) (pubkeys, sigs []dex.Byte
 	return nil, nil, w.signCoinErr
 }
 
-func (w *TXCWallet) AuditContract(coinID, contract dex.Bytes) (asset.AuditInfo, error) {
+func (w *TXCWallet) AuditContract(coinID, contract, txData dex.Bytes) (asset.AuditInfo, error) {
 	defer func() {
 		if w.auditChan != nil {
 			w.auditChan <- struct{}{}
@@ -1723,6 +1723,7 @@ func TestLogin(t *testing.T) {
 			MakerContract: missedContract,
 			MakerSwap:     encode.RandomBytes(36),
 			Active:        true,
+			TxData:        []byte{0x01},
 		}}, nil)
 		f(resp)
 		return nil
@@ -1767,8 +1768,8 @@ func TestLogin(t *testing.T) {
 	tracker.mtx.Lock()
 	defer tracker.mtx.Unlock()
 	match = tracker.matches[extraID]
-	if !bytes.Equal(match.MetaData.Proof.CounterScript, missedContract) {
-		t.Errorf("Missed maker contract not retrieved, %s, %s", match.id, hex.EncodeToString(match.MetaData.Proof.CounterScript))
+	if !bytes.Equal(match.MetaData.Proof.CounterContract, missedContract) {
+		t.Errorf("Missed maker contract not retrieved, %s, %s", match.id, hex.EncodeToString(match.MetaData.Proof.CounterContract))
 	}
 }
 
@@ -2678,7 +2679,7 @@ func TestTradeTracking(t *testing.T) {
 
 	// Check audit errors.
 	tBtcWallet.auditErr = tErr
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for AuditContract error")
 	}
@@ -2686,7 +2687,7 @@ func TestTradeTracking(t *testing.T) {
 	// Check expiration error.
 	match.MetaData.Proof.SelfRevoked = true // keeps trying unless revoked
 	tBtcWallet.auditErr = asset.CoinNotFoundError
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for AuditContract expiration")
 	}
@@ -2698,28 +2699,28 @@ func TestTradeTracking(t *testing.T) {
 	match.MetaData.Proof.SelfRevoked = false
 
 	auditInfo.coin.val = auditQty - 1
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for low value")
 	}
 	auditInfo.coin.val = auditQty
 
 	auditInfo.secretHash = []byte{0x01}
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for wrong secret hash")
 	}
 	auditInfo.secretHash = proof.SecretHash
 
 	auditInfo.recipient = "wrong address"
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for wrong address")
 	}
 	auditInfo.recipient = addr
 
 	auditInfo.expiration = matchTime.Add(tracker.lockTimeTaker - time.Hour)
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for early lock time")
 	}
@@ -2739,7 +2740,7 @@ func TestTradeTracking(t *testing.T) {
 	if match.counterSwap == nil {
 		t.Fatalf("counter-swap not set")
 	}
-	if !bytes.Equal(proof.CounterScript, audit.Contract) {
+	if !bytes.Equal(proof.CounterContract, audit.Contract) {
 		t.Fatalf("counter-script not recorded")
 	}
 	if !bytes.Equal(proof.TakerSwap, audit.CoinID) {
@@ -2823,7 +2824,7 @@ func TestTradeTracking(t *testing.T) {
 	tBtcWallet.auditInfo = auditInfo
 	// early lock time
 	auditInfo.expiration = matchTime.Add(tracker.lockTimeMaker - time.Hour)
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no taker error for early lock time")
 	}
@@ -3355,7 +3356,7 @@ func TestRefunds(t *testing.T) {
 
 	// Check audit errors.
 	tBtcWallet.auditErr = tErr
-	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
+	err = tracker.auditContract(match, audit.CoinID, audit.Contract, nil)
 	if err == nil {
 		t.Fatalf("no maker error for AuditContract error")
 	}
@@ -3497,9 +3498,9 @@ func TestResolveActiveTrades(t *testing.T) {
 		MetaData: &db.MatchMetaData{
 			Status: order.MakerSwapCast,
 			Proof: db.MatchProof{
-				CounterScript: encode.RandomBytes(50),
-				SecretHash:    encode.RandomBytes(32),
-				MakerSwap:     encode.RandomBytes(32),
+				CounterContract: encode.RandomBytes(50),
+				SecretHash:      encode.RandomBytes(32),
+				MakerSwap:       encode.RandomBytes(32),
 				Auth: db.MatchAuth{
 					MatchSig: encode.RandomBytes(32),
 				},
@@ -5143,6 +5144,7 @@ func TestMatchStatusResolution(t *testing.T) {
 
 	tBytes := encode.RandomBytes(2)
 	tCoinID := encode.RandomBytes(36)
+	tTxData := encode.RandomBytes(1)
 
 	setAuthSigs := func(status order.MatchStatus) {
 		isMaker := match.Match.Side == order.Maker
@@ -5199,13 +5201,13 @@ func TestMatchStatusResolution(t *testing.T) {
 				proof.Script = tBytes
 				proof.Secret = secret
 			} else {
-				proof.CounterScript = tBytes
+				proof.CounterContract = tBytes
 			}
 		}
 		if status >= order.TakerSwapCast {
 			proof.TakerSwap = tCoinID
 			if isMaker {
-				proof.CounterScript = tBytes
+				proof.CounterContract = tBytes
 			} else {
 				proof.Script = tBytes
 			}
@@ -5236,6 +5238,9 @@ func TestMatchStatusResolution(t *testing.T) {
 		if status >= order.MakerSwapCast {
 			tMatchResults.MakerContract = tBytes
 			tMatchResults.MakerSwap = tCoinID
+		}
+		if status == order.MakerSwapCast || status == order.TakerSwapCast {
+			tMatchResults.TxData = tTxData
 		}
 		if status >= order.TakerSwapCast {
 			tMatchResults.TakerContract = tBytes

@@ -407,6 +407,7 @@ func (a *TAsset) Connect(context.Context) (*sync.WaitGroup, error)         { ret
 func (a *TAsset) ValidateSecret(secret, contract []byte) bool              { return true }
 func (a *TAsset) VerifyUnspentCoin(_ context.Context, coinID []byte) error { return nil }
 func (a *TAsset) Synced() (bool, error)                                    { return true, nil }
+func (a *TAsset) TxData(context.Context, []byte) ([]byte, error)           { return nil, nil }
 
 func (a *TAsset) setContractErr(err error) {
 	a.mtx.Lock()
@@ -445,6 +446,7 @@ type TCoin struct {
 	auditAddr string
 	auditVal  uint64
 	lockTime  time.Time
+	txData    []byte
 }
 
 func (coin *TCoin) Confirmations(context.Context) (int64, error) {
@@ -463,6 +465,10 @@ func (coin *TCoin) Addresses() []string {
 
 func (coin *TCoin) LockTime() time.Time {
 	return coin.lockTime
+}
+
+func (coin *TCoin) TxData() []byte {
+	return coin.txData
 }
 
 func (coin *TCoin) setConfs(confs int64) {
@@ -776,7 +782,7 @@ func (rig *testRig) auditSwap_taker() error {
 	if req == nil {
 		return fmt.Errorf("failed to find audit request for taker after maker's init")
 	}
-	return rig.auditSwap(req.req, matchInfo.takerOID, matchInfo.db.makerSwap.contract, "taker", matchInfo.taker)
+	return rig.auditSwap(req.req, matchInfo.takerOID, matchInfo.db.makerSwap, "taker", matchInfo.taker)
 }
 
 // Maker: Process the 'audit' request from the swapper. The request should be
@@ -795,7 +801,7 @@ func (rig *testRig) auditSwap_maker() error {
 	if req == nil {
 		return fmt.Errorf("failed to find audit request for maker after taker's init")
 	}
-	return rig.auditSwap(req.req, matchInfo.makerOID, matchInfo.db.takerSwap.contract, "maker", matchInfo.maker)
+	return rig.auditSwap(req.req, matchInfo.makerOID, matchInfo.db.takerSwap, "maker", matchInfo.maker)
 }
 
 // checkSigS256 checks that the message's signature was created with the
@@ -811,7 +817,7 @@ func checkSigS256(msg msgjson.Signable, pubKey *secp256k1.PublicKey) error {
 	return nil
 }
 
-func (rig *testRig) auditSwap(msg *msgjson.Message, oid order.OrderID, contract, tag string, user *tUser) error {
+func (rig *testRig) auditSwap(msg *msgjson.Message, oid order.OrderID, swap *tSwap, tag string, user *tUser) error {
 	if msg == nil {
 		return fmt.Errorf("no %s 'audit' request from DEX", user.lbl)
 	}
@@ -834,8 +840,11 @@ func (rig *testRig) auditSwap(msg *msgjson.Message, oid order.OrderID, contract,
 	if params.MatchID.String() != matchID.String() {
 		return fmt.Errorf("%s : incorrect match ID in auditSwap, expected '%s', got '%s'", tag, matchID, params.MatchID)
 	}
-	if params.Contract.String() != contract {
-		return fmt.Errorf("%s : incorrect contract. expected '%s', got '%s'", tag, contract, params.Contract)
+	if params.Contract.String() != swap.contract {
+		return fmt.Errorf("%s : incorrect contract. expected '%s', got '%s'", tag, swap.contract, params.Contract)
+	}
+	if !bytes.Equal(params.TxData, swap.coin.txData) {
+		return fmt.Errorf("%s : incorrect tx data. expected '%s', got '%s'", tag, swap.coin.txData, params.TxData)
 	}
 	return nil
 }
@@ -1220,6 +1229,7 @@ func tNewSwap(matchInfo *tMatch, oid order.OrderID, recipient string, user *tUse
 		auditAddr: recipient + tRecipientSpoofer,
 		auditVal:  auditVal * tValSpoofer,
 		id:        coinID,
+		txData:    encode.RandomBytes(100),
 	}
 
 	swap.lockTime = encode.DropMilliseconds(matchInfo.match.Epoch.End().Add(dex.LockTimeTaker(dex.Testnet)))

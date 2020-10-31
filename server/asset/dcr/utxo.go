@@ -198,6 +198,11 @@ type Contract struct {
 	lockTime      time.Time
 }
 
+// TxData is the raw transaction bytes. Part of the asset.Contract interface.
+func (c *Contract) TxData() []byte {
+	return c.tx.raw
+}
+
 var _ asset.Contract = (*Contract)(nil)
 
 // Confirmations returns the number of confirmations for a transaction output.

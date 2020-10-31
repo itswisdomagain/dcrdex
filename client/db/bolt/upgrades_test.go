@@ -27,12 +27,13 @@ type upgradeValidator struct {
 var validators = []upgradeValidator{
 	{v1Upgrade, verifyV1Upgrade, 1},
 	{v2Upgrade, verifyV2Upgrade, 2},
+	/*{v3Upgrade, verifyV3Upgrade, 3},*/
 }
 
 // The indices of the archives here in outdatedDBs should match the first
 // eligible validator for the database.
 var outdatedDBs = []string{
-	"v0.db.gz", "v1.db.gz",
+	"v0.db.gz", "v1.db.gz", /*"v2.db.gz",*/
 }
 
 func TestUpgrades(t *testing.T) {
@@ -113,27 +114,24 @@ func TestUpgradeDB(t *testing.T) {
 }
 
 func verifyV1Upgrade(t *testing.T, db *bbolt.DB) {
-	err := db.View(func(dbtx *bbolt.Tx) error {
-		return checkVersion(dbtx, 1)
-	})
+	err := checkVersion(db, 1)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 }
 
 func verifyV2Upgrade(t *testing.T, db *bbolt.DB) {
-	maxFeeB := uint64Bytes(^uint64(0))
+	err := checkVersion(db, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err := db.View(func(dbtx *bbolt.Tx) error {
-		err := checkVersion(dbtx, 2)
-		if err != nil {
-			return err
-		}
-
+	err = db.View(func(dbtx *bbolt.Tx) error {
 		master := dbtx.Bucket(ordersBucket)
 		if master == nil {
 			return fmt.Errorf("orders bucket not found")
 		}
+		maxFeeB := uint64Bytes(^uint64(0))
 		return master.ForEach(func(oid, _ []byte) error {
 			oBkt := master.Bucket(oid)
 			if oBkt == nil {
@@ -150,21 +148,30 @@ func verifyV2Upgrade(t *testing.T, db *bbolt.DB) {
 	}
 }
 
-func checkVersion(dbtx *bbolt.Tx, expectedVersion uint32) error {
-	bkt := dbtx.Bucket(appBucket)
-	if bkt == nil {
-		return fmt.Errorf("appBucket not found")
+func verifyV3Upgrade(t *testing.T, db *bbolt.DB) {
+	err := checkVersion(db, 3)
+	if err != nil {
+		t.Fatal(err)
 	}
-	versionB := bkt.Get(versionKey)
-	if versionB == nil {
-		return fmt.Errorf("expected a non-nil version value")
-	}
-	version := intCoder.Uint32(versionB)
-	if version != expectedVersion {
-		return fmt.Errorf("expected db version %d, got %d",
-			expectedVersion, version)
-	}
-	return nil
+}
+
+func checkVersion(db *bbolt.DB, expectedVersion uint32) error {
+	return db.View(func(dbtx *bbolt.Tx) error {
+		bkt := dbtx.Bucket(appBucket)
+		if bkt == nil {
+			return fmt.Errorf("appBucket not found")
+		}
+		versionB := bkt.Get(versionKey)
+		if versionB == nil {
+			return fmt.Errorf("expected a non-nil version value")
+		}
+		version := intCoder.Uint32(versionB)
+		if version != expectedVersion {
+			return fmt.Errorf("expected db version %d, got %d",
+				expectedVersion, version)
+		}
+		return nil
+	})
 }
 
 func unpack(t *testing.T, db string) (string, func()) {

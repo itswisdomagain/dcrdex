@@ -365,6 +365,8 @@ func (t *testNode) GetBestBlockHash() (*chainhash.Hash, error) {
 	return &bbHash, nil
 }
 
+func (t testNode) GetRawTransaction(txHash *chainhash.Hash) (*btcutil.Tx, error) { return nil, nil }
+
 func (t *testNode) RawRequest(string, []json.RawMessage) (json.RawMessage, error) {
 	if t.rawErr != nil {
 		return nil, t.rawErr
