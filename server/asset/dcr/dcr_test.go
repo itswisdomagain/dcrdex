@@ -215,6 +215,11 @@ func (*testNode) GetRawTransactionVerbose(_ context.Context, txHash *chainhash.H
 }
 
 // Part of the dcrNode interface.
+func (testNode) GetRawTransaction(_ context.Context, txHash *chainhash.Hash) (*dcrutil.Tx, error) {
+	return nil, nil
+}
+
+// Part of the dcrNode interface.
 func (*testNode) GetBlockVerbose(_ context.Context, blockHash *chainhash.Hash, verboseTx bool) (*chainjson.GetBlockVerboseResult, error) {
 	testChainMtx.RLock()
 	defer testChainMtx.RUnlock()

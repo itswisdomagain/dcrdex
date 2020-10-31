@@ -72,6 +72,7 @@ type dcrNode interface {
 	EstimateSmartFee(ctx context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (float64, error)
 	GetTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, mempool bool) (*chainjson.GetTxOutResult, error)
 	GetRawTransactionVerbose(ctx context.Context, txHash *chainhash.Hash) (*chainjson.TxRawResult, error)
+	GetRawTransaction(ctx context.Context, txHash *chainhash.Hash) (*dcrutil.Tx, error)
 	GetBlockVerbose(ctx context.Context, blockHash *chainhash.Hash, verboseTx bool) (*chainjson.GetBlockVerboseResult, error)
 	GetBlockHash(ctx context.Context, blockHeight int64) (*chainhash.Hash, error)
 	GetBestBlockHash(ctx context.Context) (*chainhash.Hash, error)
@@ -385,6 +386,23 @@ func (dcr *Backend) CheckAddress(addr string) bool {
 	return err == nil
 }
 
+// TxData is the raw transaction bytes. SPV clients rebroadcast the transaction
+// bytes to get around not having a mempool to check.
+func (dcr *Backend) TxData(ctx context.Context, coinID []byte) ([]byte, error) {
+	txHash, _, err := decodeCoinID(coinID)
+	if err != nil {
+		return nil, err
+	}
+	dcrutilTx, err := dcr.node.GetRawTransaction(ctx, txHash)
+	if err != nil {
+		if isTxNotFoundErr(err) {
+			return nil, asset.CoinNotFoundError
+		}
+		return nil, fmt.Errorf("GetRawTransactionVerbose for txid %s: %w", txHash, err)
+	}
+	return dcrutilTx.MsgTx().Bytes()
+}
+
 // VerifyUnspentCoin attempts to verify a coin ID by decoding the coin ID and
 // retrieving the corresponding UTXO. If the coin is not found or no longer
 // unspent, an asset.CoinNotFoundError is returned.
@@ -540,11 +558,16 @@ func (dcr *Backend) transaction(txHash *chainhash.Hash, verboseTx *chainjson.TxR
 			pkScript: pkScript,
 		})
 	}
+	rawTx, err := hex.DecodeString(verboseTx.Hex)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding tx hex: %w", err)
+	}
+
 	feeRate := (sumIn - sumOut) / uint64(len(verboseTx.Hex)/2)
 	if isCoinbase {
 		feeRate = 0
 	}
-	return newTransaction(txHash, blockHash, lastLookup, verboseTx.BlockHeight, isStake, isCoinbase, inputs, outputs, feeRate), nil
+	return newTransaction(txHash, blockHash, lastLookup, verboseTx.BlockHeight, isStake, isCoinbase, inputs, outputs, feeRate, rawTx), nil
 }
 
 // run processes the queue and monitors the application context.

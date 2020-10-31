@@ -3626,13 +3626,19 @@ func (c *Core) resumeTrades(dc *dexConnection, trackers []*trackedTrade) assetMa
 					notifyErr(SubjectMatchStatusError, "Match %s for order %s is in state %s, but has no maker swap coin.", dbMatch.Side, tracker.token(), dbMatch.Status)
 					continue
 				}
-				counterContract := metaData.Proof.CounterScript
+				counterContract := metaData.Proof.CounterContract
 				if len(counterContract) == 0 {
 					match.swapErr = fmt.Errorf("missing counter-contract, order %s, match %s", tracker.ID(), match.id)
 					notifyErr(SubjectMatchStatusError, "Match %s for order %s is in state %s, but has no maker swap contract.", dbMatch.Side, tracker.token(), dbMatch.Status)
 					continue
 				}
-				auditInfo, err := wallets.toWallet.AuditContract(counterSwap, counterContract)
+				counterTxData := metaData.Proof.CounterTxData
+				if len(counterTxData) == 0 {
+					match.swapErr = fmt.Errorf("missing counter-tx-data, order %s, match %s", tracker.ID(), match.id)
+					notifyErr("Match status error", "Match %s for order %s is in state %s, but has no maker swap tx data.", dbMatch.Side, tracker.token(), dbMatch.Status)
+					continue
+				}
+				auditInfo, err := wallets.toWallet.AuditContract(counterSwap, counterContract, counterTxData)
 				if err != nil {
 					c.log.Debugf("AuditContract error for match %v status %v, refunded = %v, revoked = %v: %v",
 						match.id, match.MetaData.Status, len(match.MetaData.Proof.RefundCoin) > 0, match.MetaData.Proof.IsRevoked(), err)
