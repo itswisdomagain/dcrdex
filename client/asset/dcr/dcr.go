@@ -556,17 +556,21 @@ func (dcr *ExchangeWallet) Connect(ctx context.Context) (*sync.WaitGroup, error)
 	}
 	ver, exists = versions["dcrdjsonrpcapi"]
 	if !exists {
-		return nil, fmt.Errorf("dcrwallet.Version response missing 'dcrdjsonrpcapi'")
-	}
-	nodeSemver := dex.NewSemver(ver.Major, ver.Minor, ver.Patch)
-	if !dex.SemverCompatible(requiredNodeVersion, nodeSemver) {
-		return nil, fmt.Errorf("dcrd has an incompatible JSON-RPC version: got %s, expected %s",
-			nodeSemver, requiredNodeVersion)
-	}
+		dcr.log.Infof("Connected to dcrwallet (JSON-RPC API v%s) in SPV mode", walletSemver)
+	} else {
+		nodeSemver := dex.NewSemver(ver.Major, ver.Minor, ver.Patch)
+		if !dex.SemverCompatible(requiredNodeVersion, nodeSemver) {
+			return nil, fmt.Errorf("dcrd has an incompatible JSON-RPC version: got %s, expected %s",
+				nodeSemver, requiredNodeVersion)
+		}
 
-	curnet, err := dcr.client.GetCurrentNet(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("getcurrentnet failure: %w", err)
+		curnet, err := dcr.client.GetCurrentNet(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("getcurrentnet failure: %w", err)
+		}
+
+		dcr.log.Infof("Connected to dcrwallet (JSON-RPC API v%s) proxying dcrd (JSON-RPC API v%s) on %v",
+			walletSemver, nodeSemver, curnet)
 	}
 
 	// Initialize the best block.
@@ -577,9 +581,6 @@ func (dcr *ExchangeWallet) Connect(ctx context.Context) (*sync.WaitGroup, error)
 		return nil, fmt.Errorf("error initializing best block for DCR: %w", err)
 	}
 	atomic.StoreInt64(&dcr.tipAtConnect, dcr.currentTip.height)
-
-	dcr.log.Infof("Connected to dcrwallet (JSON-RPC API v%s) proxying dcrd (JSON-RPC API v%s) on %v",
-		walletSemver, nodeSemver, curnet)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
