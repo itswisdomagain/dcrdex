@@ -36,3 +36,5 @@ require (
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e
 	gopkg.in/ini.v1 v1.55.0
 )
+
+replace decred.org/dcrwallet v1.6.0-rc4 => github.com/itswisdomagain/dcrwallet v1.2.3-0.20210126015648-5a22e85af683

@@ -63,6 +63,7 @@ const (
 	methodListUnspent        = "listunspent"
 	methodListLockUnspent    = "listlockunspent"
 	methodSignRawTransaction = "signrawtransaction"
+	methodSyncStatus         = "syncstatus"
 )
 
 var (
@@ -2062,21 +2063,12 @@ func (dcr *ExchangeWallet) shutdown() {
 
 // SyncStatus is information about the blockchain sync status.
 func (dcr *ExchangeWallet) SyncStatus() (bool, float32, error) {
-	chainInfo, err := dcr.node.GetBlockChainInfo(dcr.ctx)
+	syncStatus := new(walletjson.SyncStatusResult)
+	err := dcr.nodeRawRequest(methodSyncStatus, nil, syncStatus)
 	if err != nil {
-		return false, 0, fmt.Errorf("getblockchaininfo error: %w", translateRPCCancelErr(err))
+		return false, 0, fmt.Errorf("rawrequest error: %w", err)
 	}
-	toGo := chainInfo.Headers - chainInfo.Blocks
-	if chainInfo.InitialBlockDownload || toGo > 1 {
-		ogTip := atomic.LoadInt64(&dcr.tipAtConnect)
-		totalToSync := chainInfo.Headers - ogTip
-		var progress float32 = 1
-		if totalToSync > 0 {
-			progress = 1 - (float32(toGo) / float32(totalToSync))
-		}
-		return false, progress, nil
-	}
-	return true, 1, nil
+	return syncStatus.Synced || syncStatus.InitialBlockDownload, syncStatus.HeadersFetchProgress, nil
 }
 
 // Combines the RPC type with the spending input information.
