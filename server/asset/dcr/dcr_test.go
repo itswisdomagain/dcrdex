@@ -7,6 +7,7 @@ package dcr
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -193,14 +194,36 @@ func (*testNode) EstimateSmartFee(_ context.Context, confirmations int64, mode c
 	return optimalRate, nil // optimalFeeRate: 22 atoms/byte = 0.00022 DCR/KB * 1e8 atoms/DCR * 1e-3 KB/Byte
 }
 
-// Part of the dcrNode interface.
-func (*testNode) GetTxOut(_ context.Context, txHash *chainhash.Hash, index uint32, _ bool) (*chainjson.GetTxOutResult, error) {
-	outID := txOutID(txHash, index)
-	testChainMtx.RLock()
-	defer testChainMtx.RUnlock()
-	out := testChain.txOuts[outID]
-	// Unfound is not an error for GetTxOut.
-	return out, nil
+func (*testNode) RawRequest(_ context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
+	switch method {
+	case methodGetTxOut:
+		if len(params) < 3 || len(params) > 4 {
+			return nil, fmt.Errorf("gettxout requires 3-4 params, got %d", len(params)) // txid vout tree (mempool)
+		}
+
+		var txid string
+		err := json.Unmarshal(params[0], &txid)
+		if err != nil {
+			return nil, err
+		}
+		txHash, err := chainhash.NewHashFromStr(txid)
+		if err != nil {
+			return nil, err
+		}
+		var index uint32
+		err = json.Unmarshal(params[1], &index)
+		if err != nil {
+			return nil, err
+		}
+
+		outID := txOutID(txHash, index)
+		testChainMtx.RLock()
+		defer testChainMtx.RUnlock()
+		out := testChain.txOuts[outID]
+		return json.Marshal(out) // Unfound is not an error for GetTxOut.
+	}
+
+	return nil, fmt.Errorf("method %v not implemented by (*testNode).RawRequest", method)
 }
 
 // Part of the dcrNode interface.

@@ -255,10 +255,6 @@ func (c *tRPCClient) SendRawTransaction(_ context.Context, tx *wire.MsgTx, allow
 	return c.sendRawHash, c.sendRawErr
 }
 
-func (c *tRPCClient) GetTxOut(_ context.Context, txHash *chainhash.Hash, vout uint32, mempool bool) (*chainjson.GetTxOutResult, error) {
-	return c.txOutRes[newOutPoint(txHash, vout)], c.txOutErr
-}
-
 func (c *tRPCClient) GetBestBlock(_ context.Context) (*chainhash.Hash, int64, error) {
 	if c.bestBlockErr != nil {
 		return nil, -1, c.bestBlockErr
@@ -383,6 +379,32 @@ func (c *tRPCClient) Disconnected() bool {
 
 func (c *tRPCClient) RawRequest(_ context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	switch method {
+	case methodGetTxOut:
+		if len(params) < 3 || len(params) > 4 {
+			return nil, fmt.Errorf("gettxout requires 3-4 params, got %d", len(params)) // txid vout tree (mempool)
+		}
+		if c.txOutErr != nil {
+			return nil, c.txOutErr
+		}
+
+		var txid string
+		err := json.Unmarshal(params[0], &txid)
+		if err != nil {
+			return nil, err
+		}
+		txHash, err := chainhash.NewHashFromStr(txid)
+		if err != nil {
+			return nil, err
+		}
+		var index uint32
+		err = json.Unmarshal(params[1], &index)
+		if err != nil {
+			return nil, err
+		}
+
+		txOut := c.txOutRes[newOutPoint(txHash, index)]
+		return json.Marshal(txOut)
+
 	case methodListUnspent:
 		if c.unspentErr != nil {
 			return nil, c.unspentErr

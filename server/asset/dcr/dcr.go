@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -57,12 +58,15 @@ var (
 	// check for new blocks.
 	blockPollInterval = time.Second
 
-	requiredNodeVersion = dex.Semver{Major: 6, Minor: 1, Patch: 2}
+	requiredNodeVersion = dex.Semver{Major: 7, Minor: 0, Patch: 0}
 )
 
 const (
 	assetName                = "dcr"
 	immatureTransactionError = dex.ErrorKind("immature output")
+
+	// RawRequest RPC methods
+	methodGetTxOut = "gettxout"
 )
 
 // dcrNode represents a blockchain information fetcher. In practice, it is
@@ -70,12 +74,12 @@ const (
 // methods. For testing, it can be satisfied by a stub.
 type dcrNode interface {
 	EstimateSmartFee(ctx context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (float64, error)
-	GetTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, mempool bool) (*chainjson.GetTxOutResult, error)
 	GetRawTransactionVerbose(ctx context.Context, txHash *chainhash.Hash) (*chainjson.TxRawResult, error)
 	GetBlockVerbose(ctx context.Context, blockHash *chainhash.Hash, verboseTx bool) (*chainjson.GetBlockVerboseResult, error)
 	GetBlockHash(ctx context.Context, blockHeight int64) (*chainhash.Hash, error)
 	GetBestBlockHash(ctx context.Context) (*chainhash.Hash, error)
 	GetBlockChainInfo(ctx context.Context) (*chainjson.GetBlockChainInfoResult, error)
+	RawRequest(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error)
 }
 
 // The rpcclient package functions will return a rpcclient.ErrRequestCanceled
@@ -393,7 +397,10 @@ func (dcr *Backend) VerifyUnspentCoin(ctx context.Context, coinID []byte) error 
 	if err != nil {
 		return fmt.Errorf("error decoding coin ID %x: %w", coinID, err)
 	}
-	txOut, err := dcr.node.GetTxOut(ctx, txHash, vout, true)
+	txOut, err := dcr.getTxOut(ctx, txHash, vout, wire.TxTreeRegular, true) // check regular tree first
+	if err == nil && txOut == nil {
+		txOut, err = dcr.getTxOut(ctx, txHash, vout, wire.TxTreeStake, true) // check stake tree
+	}
 	if err != nil {
 		return fmt.Errorf("GetTxOut (%s:%d): %w", txHash.String(), vout, translateRPCCancelErr(err))
 	}
@@ -901,9 +908,15 @@ func msgTxFromHex(txhex string) (*wire.MsgTx, error) {
 	return msgTx, nil
 }
 
+func (dcr *Backend) getTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, tree int8, mempool bool) (*chainjson.GetTxOutResult, error) {
+	var txout *chainjson.GetTxOutResult
+	err := dcr.nodeRawRequest(methodGetTxOut, anylist{txHash.String(), index, tree, mempool}, &txout)
+	return txout, err
+}
+
 // Get information for an unspent transaction output.
-func (dcr *Backend) getUnspentTxOut(ctx context.Context, txHash *chainhash.Hash, vout uint32) (*chainjson.GetTxOutResult, []byte, error) {
-	txOut, err := dcr.node.GetTxOut(ctx, txHash, vout, true)
+func (dcr *Backend) getUnspentTxOut(ctx context.Context, txHash *chainhash.Hash, vout uint32, tree int8) (*chainjson.GetTxOutResult, []byte, error) {
+	txOut, err := dcr.getTxOut(ctx, txHash, vout, tree, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetTxOut error for output %s:%d: %w",
 			txHash, vout, translateRPCCancelErr(err))
@@ -921,13 +934,18 @@ func (dcr *Backend) getUnspentTxOut(ctx context.Context, txHash *chainhash.Hash,
 // Get information for an unspent transaction output, plus the verbose
 // transaction.
 func (dcr *Backend) getTxOutInfo(ctx context.Context, txHash *chainhash.Hash, vout uint32) (*chainjson.GetTxOutResult, *chainjson.TxRawResult, []byte, error) {
-	txOut, pkScript, err := dcr.getUnspentTxOut(ctx, txHash, vout)
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	verboseTx, err := dcr.node.GetRawTransactionVerbose(ctx, txHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("GetRawTransactionVerbose for txid %s: %w", txHash, translateRPCCancelErr(err))
+	}
+	msgTx, err := msgTxFromHex(verboseTx.Hex)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to decode MsgTx from hex for transaction %s: %w", txHash, err)
+	}
+	txTree := stake.DetermineTxType(msgTx, msgTx.Version == wire.TxVersionTreasury)
+	txOut, pkScript, err := dcr.getUnspentTxOut(ctx, txHash, vout, int8(txTree))
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	return txOut, verboseTx, pkScript, nil
 }
@@ -992,6 +1010,32 @@ func connectNodeRPC(host, user, pass, cert string) (*rpcclient.Client, error) {
 	}
 
 	return dcrdClient, nil
+}
+
+// anylist is a list of RPC parameters to be converted to []json.RawMessage and
+// sent via nodeRawRequest.
+type anylist []interface{}
+
+// nodeRawRequest is used to marshal parameters and send requests to the RPC
+// server via (*rpcclient.Client).RawRequest. If `thing` is non-nil, the result
+// will be marshaled into `thing`.
+func (dcr *Backend) nodeRawRequest(method string, args anylist, thing interface{}) error {
+	params := make([]json.RawMessage, 0, len(args))
+	for i := range args {
+		p, err := json.Marshal(args[i])
+		if err != nil {
+			return err
+		}
+		params = append(params, p)
+	}
+	b, err := dcr.node.RawRequest(dcr.ctx, method, params)
+	if err != nil {
+		return fmt.Errorf("rawrequest error: %w", translateRPCCancelErr(err))
+	}
+	if thing != nil {
+		return json.Unmarshal(b, thing)
+	}
+	return nil
 }
 
 // decodeCoinID decodes the coin ID into a tx hash and a vin/vout index.
