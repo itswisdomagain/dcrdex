@@ -194,7 +194,7 @@ func (*testNode) EstimateSmartFee(_ context.Context, confirmations int64, mode c
 }
 
 // Part of the dcrNode interface.
-func (*testNode) GetTxOut(_ context.Context, txHash *chainhash.Hash, index uint32, _ bool) (*chainjson.GetTxOutResult, error) {
+func (*testNode) GetTxOut(_ context.Context, txHash *chainhash.Hash, index uint32, tree int8, _ bool) (*chainjson.GetTxOutResult, error) {
 	outID := txOutID(txHash, index)
 	testChainMtx.RLock()
 	defer testChainMtx.RUnlock()

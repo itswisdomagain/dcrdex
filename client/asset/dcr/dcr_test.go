@@ -236,14 +236,89 @@ func newTRPCClient() *tRPCClient {
 	}
 }
 
-func (c *tRPCClient) EstimateSmartFee(_ context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (float64, error) {
-	optimalRate := float64(optimalFeeRate) * 1e-5
-	// fmt.Println((float64(optimalFeeRate)*1e-5)-0.00022)
-	return optimalRate, nil // optimalFeeRate: 22 atoms/byte = 0.00022 DCR/KB * 1e8 atoms/DCR * 1e-3 KB/Byte
+func (c *tRPCClient) EstimateSmartFee(ctx context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (*chainjson.EstimateSmartFeeResult, error) {
+	optimalRate := float64(optimalFeeRate) * 1e-5 // optimalFeeRate: 22 atoms/byte = 0.00022 DCR/KB * 1e8 atoms/DCR * 1e-3 KB/Byte
+	return &chainjson.EstimateSmartFeeResult{FeeRate: optimalRate}, nil
 }
 
 func (c *tRPCClient) GetBlockChainInfo(_ context.Context) (*chainjson.GetBlockChainInfoResult, error) {
 	return c.blockchainInfo, c.blockchainInfoErr
+}
+
+func (c *tRPCClient) GetTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, tree int8, mempool bool) (*chainjson.GetTxOutResult, error) {
+	return c.txOutRes[newOutPoint(txHash, index)], c.txOutErr
+}
+
+func (c *tRPCClient) ListLockUnspent(ctx context.Context, acctName string) ([]chainjson.TransactionInput, error) {
+	if c.listLockedErr != nil {
+		return nil, c.listLockedErr
+	}
+
+	allAccts := acctName == "" || acctName == "*"
+
+	var locked []chainjson.TransactionInput
+	for _, utxo := range c.lluCoins {
+		if allAccts || utxo.Account == acctName {
+			locked = append(locked, chainjson.TransactionInput{
+				Txid:   utxo.TxID,
+				Amount: utxo.Amount,
+				Vout:   utxo.Vout,
+				Tree:   utxo.Tree,
+			})
+		}
+	}
+	return locked, nil
+}
+
+func (c *tRPCClient) ListUnspent(ctx context.Context, acctName string) ([]walletjson.ListUnspentResult, error) {
+	if c.unspentErr != nil {
+		return nil, c.unspentErr
+	}
+
+	allAccts := acctName == "" || acctName == "*"
+
+	var unspents []walletjson.ListUnspentResult
+	for _, unspent := range c.unspent {
+		if allAccts || unspent.Account == acctName {
+			unspents = append(unspents, unspent)
+		}
+	}
+	return unspents, nil
+}
+
+func (c *tRPCClient) SignRawTransaction(ctx context.Context, tx *wire.MsgTx) (*walletjson.SignRawTransactionResult, error) {
+	if c.signFunc == nil {
+		return nil, fmt.Errorf("no signFunc configured")
+	}
+
+	msgTxHex, err := msgTxToHex(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode MsgTx: %w", err)
+	}
+
+	signedTx, complete, err := c.signFunc(tx)
+	if err != nil {
+		return &walletjson.SignRawTransactionResult{
+			Hex: msgTxHex,
+			Errors: []walletjson.SignRawTransactionError{
+				{
+					TxID:  tx.CachedTxHash().String(),
+					Error: err.Error(),
+				},
+			},
+			// Complete stays false.
+		}, nil
+	}
+
+	txHex, err := msgTxToHex(signedTx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode signed MsgTx: %w", err)
+	}
+
+	return &walletjson.SignRawTransactionResult{
+		Hex:      txHex,
+		Complete: complete,
+	}, nil
 }
 
 func (c *tRPCClient) SendRawTransaction(_ context.Context, tx *wire.MsgTx, allowHighFees bool) (*chainhash.Hash, error) {
@@ -253,10 +328,6 @@ func (c *tRPCClient) SendRawTransaction(_ context.Context, tx *wire.MsgTx, allow
 		return &h, nil
 	}
 	return c.sendRawHash, c.sendRawErr
-}
-
-func (c *tRPCClient) GetTxOut(_ context.Context, txHash *chainhash.Hash, vout uint32, mempool bool) (*chainjson.GetTxOutResult, error) {
-	return c.txOutRes[newOutPoint(txHash, vout)], c.txOutErr
 }
 
 func (c *tRPCClient) GetBestBlock(_ context.Context) (*chainhash.Hash, int64, error) {
@@ -379,121 +450,6 @@ func (c *tRPCClient) ValidateAddress(_ context.Context, address dcrutil.Address)
 
 func (c *tRPCClient) Disconnected() bool {
 	return c.disconnected
-}
-
-func (c *tRPCClient) RawRequest(_ context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
-	switch method {
-	case methodListUnspent:
-		if c.unspentErr != nil {
-			return nil, c.unspentErr
-		}
-
-		var acct string
-		if len(params) > 3 {
-			// filter with provided acct param
-			_ = json.Unmarshal(params[3], &acct)
-		}
-		allAccts := acct == "" || acct == "*"
-
-		var unspents []walletjson.ListUnspentResult
-		for _, unspent := range c.unspent {
-			if allAccts || unspent.Account == acct {
-				unspents = append(unspents, unspent)
-			}
-		}
-		response, _ := json.Marshal(unspents)
-		return response, nil
-
-	case methodListLockUnspent:
-		if c.listLockedErr != nil {
-			return nil, c.listLockedErr
-		}
-
-		var acct string
-		if len(params) > 0 {
-			_ = json.Unmarshal(params[0], &acct)
-		}
-		allAccts := acct == "" || acct == "*"
-
-		var locked []chainjson.TransactionInput
-		for _, utxo := range c.lluCoins {
-			if allAccts || utxo.Account == acct {
-				locked = append(locked, chainjson.TransactionInput{
-					Txid:   utxo.TxID,
-					Amount: utxo.Amount,
-					Vout:   utxo.Vout,
-					Tree:   utxo.Tree,
-				})
-			}
-		}
-		response, _ := json.Marshal(locked)
-		return response, nil
-
-	case methodSignRawTransaction:
-		if len(params) != 1 {
-			return nil, fmt.Errorf("needed 1 param")
-		}
-
-		var msgTxHex string
-		err := json.Unmarshal(params[0], &msgTxHex)
-		if err != nil {
-			return nil, err
-		}
-
-		msgTx, err := msgTxFromHex(msgTxHex)
-		if err != nil {
-			res := walletjson.SignRawTransactionResult{
-				Hex: msgTxHex,
-				Errors: []walletjson.SignRawTransactionError{
-					{
-						TxID:  msgTx.CachedTxHash().String(),
-						Error: err.Error(),
-					},
-				},
-				// Complete stays false.
-			}
-			return json.Marshal(&res)
-		}
-
-		if c.signFunc == nil {
-			return nil, fmt.Errorf("no signFunc configured")
-		}
-
-		signedTx, complete, err := c.signFunc(msgTx)
-		if err != nil {
-			res := walletjson.SignRawTransactionResult{
-				Hex: msgTxHex,
-				Errors: []walletjson.SignRawTransactionError{
-					{
-						TxID:  msgTx.CachedTxHash().String(),
-						Error: err.Error(),
-					},
-				},
-				// Complete stays false.
-			}
-			return json.Marshal(&res)
-		}
-
-		txHex, err := msgTxToHex(signedTx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode MsgTx: %w", err)
-		}
-
-		res := walletjson.SignRawTransactionResult{
-			Hex:      txHex,
-			Complete: complete,
-		}
-		return json.Marshal(&res)
-	}
-
-	if rr, found := c.rawRes[method]; found {
-		return rr, c.rawErr[method] // err probably should be nil, but respect the config
-	}
-	if re, found := c.rawErr[method]; found {
-		return nil, re
-	}
-
-	return nil, fmt.Errorf("method %v not implemented by (*tRPCClient).RawRequest", method)
 }
 
 func TestMain(m *testing.M) {

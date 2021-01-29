@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -57,16 +56,11 @@ const (
 	// splitTxBaggage is the total number of additional bytes associated with
 	// using a split transaction to fund a swap.
 	splitTxBaggage = dexdcr.MsgTxOverhead + dexdcr.P2PKHInputSize + 2*dexdcr.P2PKHOutputSize
-
-	// RawRequest RPC methods
-	methodListUnspent        = "listunspent"
-	methodListLockUnspent    = "listlockunspent"
-	methodSignRawTransaction = "signrawtransaction"
 )
 
 var (
 	requiredWalletVersion = dex.Semver{Major: 8, Minor: 4, Patch: 0}
-	requiredNodeVersion   = dex.Semver{Major: 6, Minor: 1, Patch: 2}
+	requiredNodeVersion   = dex.Semver{Major: 7, Minor: 0, Patch: 0}
 )
 
 var (
@@ -147,18 +141,22 @@ var (
 	}
 )
 
-// rpcClient is an rpcclient.Client, or a stub for testing.
+// rpcClient defines methods for interacting with a wallet and node. In practice,
+// it is satisfied by *combinedClient. For testing, it can be satisfied by a stub.
 type rpcClient interface {
-	EstimateSmartFee(ctx context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (float64, error)
+	EstimateSmartFee(ctx context.Context, confirmations int64, mode chainjson.EstimateSmartFeeMode) (*chainjson.EstimateSmartFeeResult, error)
 	GetBlockChainInfo(ctx context.Context) (*chainjson.GetBlockChainInfoResult, error)
+	SignRawTransaction(ctx context.Context, tx *wire.MsgTx) (*walletjson.SignRawTransactionResult, error)
 	SendRawTransaction(ctx context.Context, tx *wire.MsgTx, allowHighFees bool) (*chainhash.Hash, error)
-	GetTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, mempool bool) (*chainjson.GetTxOutResult, error)
+	GetTxOut(ctx context.Context, txHash *chainhash.Hash, index uint32, tree int8, mempool bool) (*chainjson.GetTxOutResult, error)
 	GetBalanceMinConf(ctx context.Context, account string, minConfirms int) (*walletjson.GetBalanceResult, error)
 	GetBestBlock(ctx context.Context) (*chainhash.Hash, int64, error)
 	GetBlockHash(ctx context.Context, blockHeight int64) (*chainhash.Hash, error)
 	GetBlockVerbose(ctx context.Context, blockHash *chainhash.Hash, verboseTx bool) (*chainjson.GetBlockVerboseResult, error)
 	GetRawMempool(ctx context.Context, txType chainjson.GetRawMempoolTxTypeCmd) ([]*chainhash.Hash, error)
 	GetRawTransactionVerbose(ctx context.Context, txHash *chainhash.Hash) (*chainjson.TxRawResult, error)
+	ListLockUnspent(ctx context.Context, acctName string) ([]chainjson.TransactionInput, error)
+	ListUnspent(ctx context.Context, acctName string) ([]walletjson.ListUnspentResult, error)
 	LockUnspent(ctx context.Context, unlock bool, ops []*wire.OutPoint) error
 	GetRawChangeAddress(ctx context.Context, account string, net dcrutil.AddressParams) (dcrutil.Address, error)
 	GetNewAddressGapPolicy(ctx context.Context, addrType string, gap dcrwallet.GapPolicy) (dcrutil.Address, error)
@@ -167,18 +165,8 @@ type rpcClient interface {
 	WalletLock(ctx context.Context) error
 	WalletPassphrase(ctx context.Context, passphrase string, timeoutSecs int64) error
 	Disconnected() bool
-	RawRequest(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error)
 	WalletInfo(ctx context.Context) (*walletjson.WalletInfoResult, error)
 	ValidateAddress(ctx context.Context, address dcrutil.Address) (*walletjson.ValidateAddressWalletResult, error)
-}
-
-// The rpcclient package functions will return a rpcclient.ErrRequestCanceled
-// error if the context is canceled. Translate these to asset.ErrRequestTimeout.
-func translateRPCCancelErr(err error) error {
-	if errors.Is(err, rpcclient.ErrRequestCanceled) {
-		err = asset.ErrRequestTimeout
-	}
-	return err
 }
 
 // outPoint is the hash and output index of a transaction output.
@@ -412,18 +400,6 @@ type findRedemptionResult struct {
 	Err              error
 }
 
-type walletClient = dcrwallet.Client
-
-type combinedClient struct {
-	*rpcclient.Client
-	*walletClient
-}
-
-// ValidateAddress disambiguates the node and wallet methods.
-func (cc *combinedClient) ValidateAddress(ctx context.Context, address dcrutil.Address) (*walletjson.ValidateAddressWalletResult, error) {
-	return cc.walletClient.ValidateAddress(ctx, address)
-}
-
 // Check that ExchangeWallet satisfies the Wallet interface.
 var _ asset.Wallet = (*ExchangeWallet)(nil)
 
@@ -651,11 +627,11 @@ func (dcr *ExchangeWallet) feeRate(confTarget uint64) (uint64, error) {
 	if confTarget < 2 {
 		confTarget = 2
 	}
-	dcrPerKB, err := dcr.node.EstimateSmartFee(dcr.ctx, int64(confTarget), chainjson.EstimateSmartFeeConservative)
+	estimateFeeResult, err := dcr.node.EstimateSmartFee(dcr.ctx, int64(confTarget), chainjson.EstimateSmartFeeConservative)
 	if err != nil {
 		return 0, translateRPCCancelErr(err)
 	}
-	atomsPerKB, err := dcrutil.NewAmount(dcrPerKB) // satPerKB is 0 when err != nil
+	atomsPerKB, err := dcrutil.NewAmount(estimateFeeResult.FeeRate) // satPerKB is 0 when err != nil
 	if err != nil {
 		return 0, err
 	}
@@ -809,16 +785,6 @@ func (dcr *ExchangeWallet) FundOrder(ord *asset.Order) (asset.Coins, []dex.Bytes
 	return coins, redeemScripts, nil
 }
 
-// unspents fetches unspent outputs for the ExchangeWallet account using rpc
-// RawRequest.
-func (dcr *ExchangeWallet) unspents() ([]walletjson.ListUnspentResult, error) {
-	var unspents []walletjson.ListUnspentResult
-	// minconf, maxconf (rpcdefault=9999999), [address], account
-	params := anylist{0, 9999999, nil, dcr.acct}
-	err := dcr.nodeRawRequest(methodListUnspent, params, &unspents)
-	return unspents, err
-}
-
 // fund finds coins for the specified value. A function is provided that can
 // check whether adding the provided output would be enough to satisfy the
 // needed value. Preference is given to selecting coins with 1 or more confs,
@@ -850,7 +816,7 @@ func (dcr *ExchangeWallet) fund(enough func(sum uint64, size uint32, unspent *co
 
 // spendableUTXOs generates a slice of spendable *compositeUTXO.
 func (dcr *ExchangeWallet) spendableUTXOs() ([]*compositeUTXO, error) {
-	unspents, err := dcr.unspents()
+	unspents, err := dcr.node.ListUnspent(dcr.ctx, dcr.acct)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,7 +1080,7 @@ func (dcr *ExchangeWallet) FundingCoins(ids []dex.Bytes) (asset.Coins, error) {
 	}
 
 	// Check locked outputs for not found coins.
-	lockedOutputs, err := dcr.lockedOutputs()
+	lockedOutputs, err := dcr.node.ListLockUnspent(dcr.ctx, dcr.acct)
 	if err != nil {
 		return nil, err
 	}
@@ -1127,7 +1093,7 @@ func (dcr *ExchangeWallet) FundingCoins(ids []dex.Bytes) (asset.Coins, error) {
 		if !notFound[pt] {
 			continue
 		}
-		txOut, err := dcr.node.GetTxOut(dcr.ctx, txHash, output.Vout, true)
+		txOut, err := dcr.getTxOut(txHash, output.Vout, true)
 		if err != nil {
 			return nil, fmt.Errorf("gettxout error for locked output %v: %w", pt.String(), translateRPCCancelErr(err))
 		}
@@ -1149,7 +1115,7 @@ func (dcr *ExchangeWallet) FundingCoins(ids []dex.Bytes) (asset.Coins, error) {
 
 	// Some funding coins still not found after checking locked outputs.
 	// Check wallet unspent outputs as last resort. Lock the coins if found.
-	unspents, err := dcr.unspents()
+	unspents, err := dcr.node.ListUnspent(dcr.ctx, dcr.acct)
 	if err != nil {
 		return nil, err
 	}
@@ -1391,7 +1357,7 @@ func (dcr *ExchangeWallet) SignMessage(coin asset.Coin, msg dex.Bytes) (pubkeys,
 		addr = fCoin.addr
 	} else {
 		// Check if we can get the address from gettxout.
-		txOut, err := dcr.node.GetTxOut(dcr.ctx, op.txHash(), op.vout(), true)
+		txOut, err := dcr.getTxOut(op.txHash(), op.vout(), true)
 		if err == nil && txOut != nil {
 			addrs := txOut.ScriptPubKey.Addresses
 			if len(addrs) != 1 {
@@ -1439,7 +1405,7 @@ func (dcr *ExchangeWallet) AuditContract(coinID, contract dex.Bytes) (asset.Audi
 		return nil, fmt.Errorf("error extracting swap addresses: %w", err)
 	}
 	// Get the contracts P2SH address from the tx output's pubkey script.
-	txOut, err := dcr.node.GetTxOut(dcr.ctx, txHash, vout, true)
+	txOut, err := dcr.getTxOut(txHash, vout, true)
 	if err != nil {
 		return nil, fmt.Errorf("error finding unspent contract: %w", translateRPCCancelErr(err))
 	}
@@ -1849,7 +1815,7 @@ func (dcr *ExchangeWallet) Refund(coinID, contract dex.Bytes) (dex.Bytes, error)
 		return nil, err
 	}
 	// Grab the unspent output to make sure it's good and to get the value.
-	utxo, err := dcr.node.GetTxOut(dcr.ctx, txHash, vout, true)
+	utxo, err := dcr.getTxOut(txHash, vout, true)
 	if err != nil {
 		return nil, fmt.Errorf("error finding unspent contract: %w", translateRPCCancelErr(err))
 	}
@@ -2004,7 +1970,7 @@ func (dcr *ExchangeWallet) Confirmations(ctx context.Context, id dex.Bytes) (con
 		return 0, false, err
 	}
 	// Check for an unspent output.
-	txOut, err := dcr.node.GetTxOut(ctx, txHash, vout, true)
+	txOut, err := dcr.getTxOut(txHash, vout, true)
 	if err == nil && txOut != nil {
 		return uint32(txOut.Confirmations), false, nil
 	}
@@ -2116,17 +2082,9 @@ func (dcr *ExchangeWallet) parseUTXOs(unspents []walletjson.ListUnspentResult) (
 	return utxos, nil
 }
 
-// lockedOutputs fetches locked outputs for the ExchangeWallet account using
-// rpc RawRequest.
-func (dcr *ExchangeWallet) lockedOutputs() ([]chainjson.TransactionInput, error) {
-	var locked []chainjson.TransactionInput
-	err := dcr.nodeRawRequest(methodListLockUnspent, anylist{dcr.acct}, &locked)
-	return locked, err
-}
-
 // lockedAtoms is the total value of locked outputs, as locked with LockUnspent.
 func (dcr *ExchangeWallet) lockedAtoms() (uint64, error) {
-	lockedOutpoints, err := dcr.lockedOutputs()
+	lockedOutpoints, err := dcr.node.ListLockUnspent(dcr.ctx, dcr.acct)
 	if err != nil {
 		return 0, err
 	}
@@ -2135,6 +2093,16 @@ func (dcr *ExchangeWallet) lockedAtoms() (uint64, error) {
 		sum += toAtoms(op.Amount)
 	}
 	return sum, nil
+}
+
+// getTxOut attempts to find the specified txout from the regular tree and if
+// not found in the regular tree, checks the stake tree.
+func (dcr *ExchangeWallet) getTxOut(txHash *chainhash.Hash, index uint32, mempool bool) (*chainjson.GetTxOutResult, error) {
+	txout, err := dcr.node.GetTxOut(dcr.ctx, txHash, index, wire.TxTreeRegular, mempool) // check regular tree first
+	if err == nil && txout == nil {
+		txout, err = dcr.node.GetTxOut(dcr.ctx, txHash, index, wire.TxTreeStake, mempool) // check stake tree
+	}
+	return txout, err
 }
 
 // convertCoin converts the asset.Coin to an unspent output.
@@ -2147,7 +2115,7 @@ func (dcr *ExchangeWallet) convertCoin(coin asset.Coin) (*output, error) {
 	if err != nil {
 		return nil, err
 	}
-	txOut, err := dcr.node.GetTxOut(dcr.ctx, txHash, vout, true)
+	txOut, err := dcr.getTxOut(txHash, vout, true)
 	if err != nil {
 		return nil, fmt.Errorf("error finding unspent output %s:%d: %w", txHash, vout, translateRPCCancelErr(err))
 	}
@@ -2245,14 +2213,9 @@ func msgTxToHex(msgTx *wire.MsgTx) (string, error) {
 // signTx attempts to sign all transaction inputs. If it fails to completely
 // sign the transaction, it is an error and a nil *wire.MsgTx is returned.
 func (dcr *ExchangeWallet) signTx(baseTx *wire.MsgTx) (*wire.MsgTx, error) {
-	txHex, err := msgTxToHex(baseTx)
+	res, err := dcr.node.SignRawTransaction(dcr.ctx, baseTx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode MsgTx: %w", err)
-	}
-	var res walletjson.SignRawTransactionResult
-	err = dcr.nodeRawRequest(methodSignRawTransaction, anylist{txHex}, &res)
-	if err != nil {
-		return nil, fmt.Errorf("rawrequest error: %w", err)
+		return nil, fmt.Errorf("SignRawTransaction error: %w", err)
 	}
 
 	for i := range res.Errors {
@@ -2605,32 +2568,6 @@ func (dcr *ExchangeWallet) wireBytes(tx *wire.MsgTx) []byte {
 		dcr.log.Errorf("error serializing transaction: %v", err)
 	}
 	return s
-}
-
-// anylist is a list of RPC parameters to be converted to []json.RawMessage and
-// sent via nodeRawRequest.
-type anylist []interface{}
-
-// nodeRawRequest is used to marshal parameters and send requests to the RPC
-// server via (*rpcclient.Client).RawRequest. If `thing` is non-nil, the result
-// will be marshaled into `thing`.
-func (dcr *ExchangeWallet) nodeRawRequest(method string, args anylist, thing interface{}) error {
-	params := make([]json.RawMessage, 0, len(args))
-	for i := range args {
-		p, err := json.Marshal(args[i])
-		if err != nil {
-			return err
-		}
-		params = append(params, p)
-	}
-	b, err := dcr.node.RawRequest(dcr.ctx, method, params)
-	if err != nil {
-		return fmt.Errorf("rawrequest error: %w", translateRPCCancelErr(err))
-	}
-	if thing != nil {
-		return json.Unmarshal(b, thing)
-	}
-	return nil
 }
 
 // Convert the DCR value to atoms.
