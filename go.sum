@@ -1,8 +1,6 @@
 cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 decred.org/cspp v0.3.0 h1:2AkSsWzA7HIMZImfw0gT82Gdp8OXIM4NsBn7vna22uE=
 decred.org/cspp v0.3.0/go.mod h1:UygjYilC94dER3BEU65Zzyoqy9ngJfWCD2rdJqvUs2A=
-decred.org/dcrwallet/v2 v2.0.0-20210129212301-69cae76621d1 h1:UTev1ywAZaCqiqIX/knNDw0sev34YzU34E0pnFrSisE=
-decred.org/dcrwallet/v2 v2.0.0-20210129212301-69cae76621d1/go.mod h1:a/gCARd0EX8yS4iML21MQME75+bxtaGqVKjgCPAXeno=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/aead/siphash v1.0.1 h1:FwHfE/T45KPKYuuSAKyyvE+oPWcaQ+CUmFW0bPlM+kg=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
@@ -143,6 +141,8 @@ github.com/gorilla/websocket v1.4.2 h1:+/TMaTYc4QFitKJxsQ7Yye35DkWvkdLcvGKqM+x0U
 github.com/gorilla/websocket v1.4.2/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/hpcloud/tail v1.0.0 h1:nfCOvKYfkgYP8hkirhJocXT2+zOD8yUNjXaWfTlyFKI=
 github.com/hpcloud/tail v1.0.0/go.mod h1:ab1qPbhIpdTxEkNHXyeSf5vhxWSCs/tWer42PpOxQnU=
+github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210130000200-ae1a2388d912 h1:r5Pf+4YcGiC7vuPP2fz3gG/+BdiRKQl4fwS9OKUbRNg=
+github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210130000200-ae1a2388d912/go.mod h1:a/gCARd0EX8yS4iML21MQME75+bxtaGqVKjgCPAXeno=
 github.com/jessevdk/go-flags v0.0.0-20141203071132-1679536dcc89/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=
 github.com/jessevdk/go-flags v1.4.0 h1:4IU2WS7AumrZ/40jfhf4QVDMsQwqA7VEHozFRrGARJA=
 github.com/jessevdk/go-flags v1.4.0/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=

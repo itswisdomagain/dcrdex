@@ -17,6 +17,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v3 v3.0.0
 	github.com/decred/dcrd/dcrjson/v3 v3.1.0
 	github.com/decred/dcrd/dcrutil/v4 v4.0.0-20210129220646-5834ce08e290
+	github.com/decred/dcrd/gcs/v3 v3.0.0-20210129195202-a4265d63b619
 	github.com/decred/dcrd/hdkeychain/v3 v3.0.0
 	github.com/decred/dcrd/rpc/jsonrpc/types/v3 v3.0.0-20210129220646-5834ce08e290
 	github.com/decred/dcrd/rpcclient/v7 v7.0.0-20210129220646-5834ce08e290
@@ -36,3 +37,5 @@ require (
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e
 	gopkg.in/ini.v1 v1.55.0
 )
+
+replace decred.org/dcrwallet/v2 => github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210130000200-ae1a2388d912
