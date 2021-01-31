@@ -837,18 +837,14 @@ func TestMatches(t *testing.T) {
 	metaMatches := make([]*db.MetaMatch, 0, numToDo)
 	matchIndex := make(map[order.MatchID]*db.MetaMatch, numToDo)
 	nTimes(numToDo, func(i int) {
-		status := order.MatchComplete // inactive
-		if i < numActive {
-			status = order.MatchStatus(rand.Intn(4))
-		}
 		m := &db.MetaMatch{
 			MetaData: &db.MatchMetaData{
-				Status: status,
-				Proof:  *dbtest.RandomMatchProof(0.5),
-				DEX:    acct.Host,
-				Base:   base,
-				Quote:  quote,
-				Stamp:  rand.Uint64(),
+				Retired: i >= numActive, // Retired=false for i = 0 to numActive-1
+				Proof:   *dbtest.RandomMatchProof(0.5),
+				DEX:     acct.Host,
+				Base:    base,
+				Quote:   quote,
+				Stamp:   rand.Uint64(),
 			},
 			Match: ordertest.RandomUserMatch(),
 		}

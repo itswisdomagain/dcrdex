@@ -216,6 +216,10 @@ func (m *MetaMatch) ID() []byte {
 type MatchMetaData struct {
 	// Status is the last known match status.
 	Status order.MatchStatus
+	// Retired is true if (1) status is MatchComplete and Proof.RedeemSig is
+	// set, (2) match is refunded, or (3) match is revoked and this side of the
+	// match requires no further action like refund or auto-redeem.
+	Retired bool
 	// Proof is the signatures and other verification-related data for the match.
 	Proof MatchProof
 	// DEX is the URL of the server that this match is associated with.

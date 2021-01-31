@@ -60,6 +60,7 @@ var (
 	linkedKey              = []byte("linked")
 	feeProofKey            = []byte("feecoin")
 	statusKey              = []byte("status")
+	retiredKey             = []byte("retired")
 	baseKey                = []byte("base")
 	quoteKey               = []byte("quote")
 	orderKey               = []byte("order")
@@ -778,10 +779,15 @@ func (db *BoltDB) UpdateMatch(m *dexdb.MetaMatch) error {
 		if err != nil {
 			return fmt.Errorf("order bucket error: %w", err)
 		}
+		retired := encode.ByteFalse
+		if md.Retired {
+			retired = encode.ByteTrue
+		}
 		return newBucketPutter(mBkt).
 			put(baseKey, uint32Bytes(md.Base)).
 			put(quoteKey, uint32Bytes(md.Quote)).
 			put(statusKey, []byte{byte(md.Status)}).
+			put(retiredKey, retired).
 			put(dexKey, []byte(md.DEX)).
 			put(updateTimeKey, uint64Bytes(timeNow())).
 			put(proofKey, md.Proof.Encode()).
@@ -794,11 +800,11 @@ func (db *BoltDB) UpdateMatch(m *dexdb.MetaMatch) error {
 }
 
 // ActiveMatches retrieves the matches that are in an active state, which is
-// any state except order.MatchComplete.
+// any match that is not retired.
 func (db *BoltDB) ActiveMatches() ([]*dexdb.MetaMatch, error) {
 	return db.filteredMatches(func(mBkt *bbolt.Bucket) bool {
-		status := mBkt.Get(statusKey)
-		return len(status) != 1 || status[0] != uint8(order.MatchComplete)
+		retiredB := mBkt.Get(retiredKey)
+		return bytes.Equal(retiredB, encode.ByteFalse) // active => retired == false
 	})
 }
 
@@ -817,60 +823,10 @@ func (db *BoltDB) DEXOrdersWithActiveMatches(dex string) ([]order.OrderID, error
 			if !bytes.Equal(dexB, mBkt.Get(dexKey)) {
 				return nil
 			}
-			// Inactive with MatchComplete status.
-			statusB := mBkt.Get(statusKey)
-			if len(statusB) != 1 {
-				db.log.Errorf("match %x has no status set", k)
-				return nil
-			}
-			status := order.MatchStatus(statusB[0])
-			if status == order.MatchComplete {
-				return nil
-			}
 
-			// Inactive if refunded.
-			proofB := getCopy(mBkt, proofKey)
-			if len(proofB) == 0 {
-				db.log.Errorf("empty match proof")
+			retiredB := mBkt.Get(retiredKey)
+			if bytes.Equal(retiredB, encode.ByteTrue) {
 				return nil
-			}
-			proof, errM := dexdb.DecodeMatchProof(proofB)
-			if errM != nil {
-				db.log.Errorf("error decoding proof: %v", errM)
-				return nil
-			}
-			if len(proof.RefundCoin) > 0 {
-				return nil
-			}
-
-			// Some revoked matches are inactive depending on match status and
-			// party side. They may need to be refunded or redeemed first.
-			// TakerSwapCast match status requires action on both sides.
-			if proof.IsRevoked() && status != order.TakerSwapCast {
-				// NewlyMatched requires no further action from either side.
-				if status == order.NewlyMatched {
-					return nil
-				}
-
-				// Load the UserMatch to check the match Side.
-				matchB := mBkt.Get(matchKey) // no copy, just need Side
-				if matchB == nil {
-					db.log.Errorf("nil match bytes for %x", k)
-					return nil
-				}
-				match, err := order.DecodeMatch(matchB)
-				if err != nil {
-					db.log.Errorf("error decoding match %x: %v", k, err)
-					return nil
-				}
-				side := match.Side // done with match and matchB
-
-				// MakerSwapCast requires no further action from the taker.
-				// MakerRedeemed requires no further action from the maker.
-				if (status == order.MakerSwapCast && side == order.Taker) ||
-					(status == order.MakerRedeemed && side == order.Maker) {
-					return nil
-				}
 			}
 
 			// The match is active.
@@ -934,14 +890,16 @@ func (db *BoltDB) filteredMatches(filter func(*bbolt.Bucket) bool) ([]*dexdb.Met
 				if len(statusB) != 1 {
 					return fmt.Errorf("expected status length 1, got %d", len(statusB))
 				}
+				retiredB := mBkt.Get(retiredKey)
 				matches = append(matches, &dexdb.MetaMatch{
 					MetaData: &dexdb.MatchMetaData{
-						Proof:  *proof,
-						Status: order.MatchStatus(statusB[0]),
-						DEX:    string(getCopy(mBkt, dexKey)),
-						Base:   intCoder.Uint32(mBkt.Get(baseKey)),
-						Quote:  intCoder.Uint32(mBkt.Get(quoteKey)),
-						Stamp:  intCoder.Uint64(mBkt.Get(stampKey)),
+						Proof:   *proof,
+						Status:  order.MatchStatus(statusB[0]),
+						Retired: bytes.Equal(retiredB, encode.ByteTrue),
+						DEX:     string(getCopy(mBkt, dexKey)),
+						Base:    intCoder.Uint32(mBkt.Get(baseKey)),
+						Quote:   intCoder.Uint32(mBkt.Get(quoteKey)),
+						Stamp:   intCoder.Uint64(mBkt.Get(stampKey)),
 					},
 					Match: match,
 				})
