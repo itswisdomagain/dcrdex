@@ -212,6 +212,43 @@ func (m *MetaMatch) ID() []byte {
 	return hashKey(append(m.Match.MatchID[:], m.Match.OrderID[:]...))
 }
 
+// Revoke marks this match as revoked and retires the match if no further
+// action is required. Recovery actions may be required for a revoked match
+// if the client has broadcasted a swap contract and has not redeemed the
+// counter-party's contract or refunded own swap.
+// Returns whether or not the match is retired by this revocation action.
+func (m *MetaMatch) Revoke(fromServer bool) bool {
+	m.MetaData.Proof.serverRevoked = fromServer
+	m.MetaData.Proof.selfRevoked = !fromServer
+
+	// Retire this match if no further action (refund or auto-redeem)
+	// is necessary. This should not be applied to cancel order matches.
+	wasRetired := m.MetaData.Retired
+	status, side := m.Match.Status, m.Match.Side
+	m.MetaData.Retired = m.Match.Address == "" || // cancel order match
+		status == order.NewlyMatched || // no swap sent yet, no recovery required
+		(status == order.MakerSwapCast && side == order.Taker) || // we're taker, haven't sent swap, no recovery required
+		(side == order.Maker && status == order.MakerRedeemed) || // we're maker and we've redeemed, no recovery required
+		status == order.MatchComplete // we've redeemed, no further action is necessary
+
+	return !wasRetired && m.MetaData.Retired
+}
+
+// SelfRevoked returns true if this match has been self-revoked.
+func (m *MetaMatch) SelfRevoked() bool {
+	return m.MetaData.Proof.selfRevoked
+}
+
+// ServerRevoked returns true if this match has been server-revoked.
+func (m *MetaMatch) ServerRevoked() bool {
+	return m.MetaData.Proof.serverRevoked
+}
+
+// IsRevoked returns true if this match has been self- or server-revoked.
+func (m *MetaMatch) IsRevoked() bool {
+	return m.SelfRevoked() || m.ServerRevoked()
+}
+
 // MatchMetaData is important auxiliary information about the match.
 type MatchMetaData struct {
 	// Status is the last known match status.
@@ -261,19 +298,19 @@ type MatchProof struct {
 	TakerRedeem   order.CoinID
 	RefundCoin    order.CoinID
 	Auth          MatchAuth
-	ServerRevoked bool
-	SelfRevoked   bool
+	serverRevoked bool
+	selfRevoked   bool
 }
 
 // Encode encodes the MatchProof to a versioned blob.
 func (p *MatchProof) Encode() []byte {
 	auth := p.Auth
 	srvRevoked := encode.ByteFalse
-	if p.ServerRevoked {
+	if p.serverRevoked {
 		srvRevoked = encode.ByteTrue
 	}
 	selfRevoked := encode.ByteFalse
-	if p.SelfRevoked {
+	if p.selfRevoked {
 		selfRevoked = encode.ByteTrue
 	}
 
@@ -347,14 +384,9 @@ func decodeMatchProof_v1(pushes [][]byte) (*MatchProof, error) {
 			RedemptionSig:   pushes[17],
 			RedemptionStamp: intCoder.Uint64(pushes[18]),
 		},
-		ServerRevoked: bytes.Equal(pushes[19], encode.ByteTrue),
-		SelfRevoked:   bytes.Equal(pushes[20], encode.ByteTrue),
+		serverRevoked: bytes.Equal(pushes[19], encode.ByteTrue),
+		selfRevoked:   bytes.Equal(pushes[20], encode.ByteTrue),
 	}, nil
-}
-
-// IsRevoked is true if either ServerRevoked or SelfRevoked is true.
-func (p *MatchProof) IsRevoked() bool {
-	return p.ServerRevoked || p.SelfRevoked
 }
 
 // OrderProof is information related to order authentication and matching.

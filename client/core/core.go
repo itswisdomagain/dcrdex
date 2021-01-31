@@ -3216,10 +3216,7 @@ func (c *Core) authDEX(dc *dexConnection) error {
 				dc.acct.host, match.id, oid)
 			// Must have been revoked while we were gone. Flag to allow recovery
 			// and subsequent retirement of the match and parent trade.
-			match.MetaData.Proof.SelfRevoked = true
-			if err := c.db.UpdateMatch(&match.MetaMatch); err != nil {
-				c.log.Errorf("Failed to update missing/revoked match: %v", err)
-			}
+			trade.revokeMatchAndUpdateDB(match, false)
 		}
 
 		// Send a "Missing matches" order note if there are missing match message.
@@ -3838,8 +3835,7 @@ func (c *Core) resumeTrades(dc *dexConnection, trackers []*trackedTrade) assetMa
 						if err != nil {
 							match.swapErr = fmt.Errorf("audit error: %w", err)
 							c.log.Debugf("AuditContract error for match %v status %v, refunded = %v, revoked = %v: %v",
-								match.id, match.MetaData.Status, len(match.MetaData.Proof.RefundCoin) > 0,
-								match.MetaData.Proof.IsRevoked(), err)
+								match.id, match.MetaData.Status, len(match.MetaData.Proof.RefundCoin) > 0, match.IsRevoked(), err)
 							notifyErr(SubjectMatchRecoveryError, "Error auditing counter-party's swap contract (%s %v) during swap recovery on order %s: %v",
 								unbip(wallets.toAsset.ID), contractStr, tracker.token(), err)
 							// The match may become revoked by server.
@@ -4278,11 +4274,19 @@ func handleRevokeMatchMsg(c *Core, dc *dexConnection, msg *msgjson.Message) erro
 	copy(matchID[:], revocation.MatchID)
 
 	tracker.mtx.Lock()
-	err = tracker.revokeMatch(matchID, true)
-	tracker.mtx.Unlock()
-	if err != nil {
-		return fmt.Errorf("unable to revoke match %s for order %s: %w", matchID, tracker.ID(), err)
+	var revokedMatch *matchTracker
+	for _, match := range tracker.matches {
+		if match.id == matchID {
+			revokedMatch = match
+			break
+		}
 	}
+	if revokedMatch == nil {
+		tracker.mtx.Unlock()
+		return fmt.Errorf("no match found with id %s for order %v", matchID, tracker.ID())
+	}
+	tracker.revokeMatchAndUpdateDB(revokedMatch, true)
+	tracker.mtx.Unlock()
 
 	// Update market orders, and the balance to account for unlocked coins.
 	c.updateAssetBalance(tracker.fromAssetID)

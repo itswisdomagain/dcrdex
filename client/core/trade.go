@@ -406,6 +406,7 @@ func (t *trackedTrade) negotiate(msgMatches []*msgjson.Match) error {
 		// Store a completed maker cancel match in the DB.
 		makerCancelMeta := t.makeMetaMatch(cancelMatch)
 		makerCancelMeta.SetStatus(order.MatchComplete)
+		makerCancelMeta.MetaData.Retired = true
 		err = t.db.UpdateMatch(makerCancelMeta)
 		if err != nil {
 			return fmt.Errorf("failed to update match in db: %w", err)
@@ -427,7 +428,7 @@ func (t *trackedTrade) negotiate(msgMatches []*msgjson.Match) error {
 		if trade.Filled()+newFill > trade.Quantity {
 			t.dc.log.Errorf("Match %s would put order %s fill over quantity. Revoking the match.",
 				match.id, t.ID())
-			match.MetaData.Proof.SelfRevoked = true
+			t.revokeMatch(match, false)
 		}
 
 		// If this order has no funding coins, block swaps attempts on the new
@@ -592,6 +593,7 @@ func (t *trackedTrade) processCancelMatch(msgMatch *msgjson.Match) error {
 	// Store the completed taker cancel match.
 	takerCancelMeta := t.makeMetaMatch(t.cancel.matches.taker)
 	takerCancelMeta.SetStatus(order.MatchComplete)
+	takerCancelMeta.MetaData.Retired = true
 	err := t.db.UpdateMatch(takerCancelMeta)
 	if err != nil {
 		return fmt.Errorf("failed to update match in db: %w", err)
@@ -723,8 +725,8 @@ func (t *trackedTrade) isActive() bool {
 		t.dc.log.Tracef("Checking match %v (%v) in status %v. "+
 			"Order: %v, Refund coin: %v, Script: %x, Revoked: %v", match.id,
 			match.Match.Side, match.MetaData.Status, t.ID(),
-			proof.RefundCoin, proof.Script, proof.IsRevoked())
-		if t.matchIsActive(match) {
+			proof.RefundCoin, proof.Script, match.IsRevoked())
+		if !match.MetaData.Retired {
 			return true
 		}
 	}
@@ -735,43 +737,7 @@ func (t *trackedTrade) isActive() bool {
 func (t *trackedTrade) matchIsRevoked(match *matchTracker) bool {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
-	return match.MetaData.Proof.IsRevoked()
-}
-
-// Matches are inactive if: (1) status is complete, (2) it is refunded, or (3)
-// it is revoked and this side of the match requires no further action like
-// refund or auto-redeem. This should not be applied to cancel order matches.
-func (t *trackedTrade) matchIsActive(match *matchTracker) bool {
-	proof := &match.MetaData.Proof
-	// MatchComplete only means inactive if redeem request was accepted, but
-	// MatchComplete is set immediately after bcast for taker.
-	if match.MetaData.Status == order.MatchComplete && len(proof.Auth.RedeemSig) > 0 {
-		return false
-	}
-
-	// Refunded matches are inactive regardless of status.
-	if len(proof.RefundCoin) > 0 {
-		return false
-	}
-
-	// Revoked matches may need to be refunded or auto-redeemed first.
-	if proof.IsRevoked() {
-		// - NewlyMatched requires no further action from either side
-		// - MakerSwapCast requires no further action from the taker
-		// - (TakerSwapCast requires action on both sides)
-		// - MakerRedeemed requires no further action from the maker
-		// - MatchComplete requires no further action. This happens if taker
-		//   does not have server's ack of their redeem request (RedeemSig).
-		status, side := match.MetaData.Status, match.Match.Side
-		if status == order.NewlyMatched || status == order.MatchComplete ||
-			(status == order.MakerSwapCast && side == order.Taker) ||
-			(status == order.MakerRedeemed && side == order.Maker) {
-			t.dc.log.Tracef("Revoked match %v (%v) in status %v considered inactive.",
-				match.id, side, status)
-			return false
-		}
-	}
-	return true
+	return match.IsRevoked()
 }
 
 func (t *trackedTrade) activeMatches() []*matchTracker {
@@ -779,7 +745,7 @@ func (t *trackedTrade) activeMatches() []*matchTracker {
 	t.mtx.RLock()
 	defer t.mtx.RUnlock()
 	for _, match := range t.matches {
-		if t.matchIsActive(match) {
+		if !match.MetaData.Retired {
 			actives = append(actives, match)
 		}
 	}
@@ -819,10 +785,10 @@ func (t *trackedTrade) unspentContractAmounts() (amount uint64) {
 // This method accesses match fields and MUST be called with the trackedTrade
 // mutex lock held for writes.
 func (t *trackedTrade) isSwappable(ctx context.Context, match *matchTracker) bool {
-	dbMatch, metaData, proof, _ := match.parts()
-	if match.swapErr != nil || proof.IsRevoked() || match.tickGovernor != nil {
+	dbMatch, metaData, _, _ := match.parts()
+	if match.swapErr != nil || match.IsRevoked() || match.tickGovernor != nil {
 		t.dc.log.Tracef("Match %v not swappable: swapErr = %v, revoked = %v, metered = %t",
-			match.id, match.swapErr, proof.IsRevoked(), match.tickGovernor != nil)
+			match.id, match.swapErr, match.IsRevoked(), match.tickGovernor != nil)
 		return false
 	}
 
@@ -848,7 +814,7 @@ func (t *trackedTrade) isSwappable(ctx context.Context, match *matchTracker) boo
 			}
 			if spent {
 				t.dc.log.Errorf("Counter-party's swap is spent before we could broadcast our own")
-				proof.SelfRevoked = true
+				t.revokeMatchAndUpdateDB(match, false)
 				return false
 			}
 			return ready
@@ -901,7 +867,7 @@ func (t *trackedTrade) isRedeemable(ctx context.Context, match *matchTracker) bo
 			}
 			if spent {
 				t.dc.log.Errorf("Order %s, match %s counter-party's swap is spent before we could redeem", t.ID(), match.id)
-				proof.SelfRevoked = true
+				t.revokeMatchAndUpdateDB(match, false)
 				return false
 			}
 			return ready
@@ -925,7 +891,7 @@ func (t *trackedTrade) isRedeemable(ctx context.Context, match *matchTracker) bo
 // - We have broadcasted a swap contract (matchProof.Script != nil).
 // - Neither party has redeemed (matchStatus < order.MakerRedeemed).
 //   For Maker, this means we've not redeemed. For Taker, this means we've
-//   not been notified of / we haven't yet found the Maker's redeem.
+//   not been notified of / we haven't yet found the Maker's redemption.
 // - Our swap's locktime has expired.
 //
 // Those checks are skipped and isRefundable is false if we've already
@@ -1005,10 +971,10 @@ func (t *trackedTrade) isRefundable(match *matchTracker) bool {
 // This method accesses match fields and MUST be called with the trackedTrade
 // mutex lock held for reads.
 func (t *trackedTrade) shouldBeginFindRedemption(ctx context.Context, match *matchTracker) bool {
-	proof := &match.MetaData.Proof
-	if !proof.IsRevoked() {
+	if !match.IsRevoked() {
 		return false // Only auto-find redemption for revoked/failed matches.
 	}
+	proof := &match.MetaData.Proof
 	swapCoinID := proof.TakerSwap
 	if match.Match.Side != order.Taker || len(swapCoinID) == 0 || len(proof.MakerRedeem) > 0 || len(proof.RefundCoin) > 0 {
 		t.dc.log.Tracef(
@@ -1046,16 +1012,19 @@ func (c *Core) tick(t *trackedTrade) (assetMap, error) {
 	// Check all matches and send swap, redeem or refund as necessary.
 	var sent, quoteSent, received, quoteReceived uint64
 	for _, match := range t.matches {
-		side := match.Match.Side
-		if (side == order.Maker && match.MetaData.Status >= order.MakerRedeemed) ||
-			(side == order.Taker && match.MetaData.Status >= order.MatchComplete) {
-			continue
-		}
 		if match.Match.Address == "" {
 			continue // a cancel order match
 		}
-		if !t.matchIsActive(match) {
-			continue // either refunded or revoked requiring no action on this side of the match
+		if match.MetaData.Retired {
+			// Match is completed (with RedeemSig set), or refunded or
+			// revoked (requiring no action on this side of the match)
+			continue
+		}
+		side, status := match.Match.Side, match.MetaData.Status
+		if status == order.MatchComplete || (side == order.Maker && status == order.MakerRedeemed) {
+			// We must have redeemed if status is MatchComplete (or MakerRedeemed for maker).
+			// Swap, redeem or refund no longer necessary.
+			continue
 		}
 		switch {
 		case t.isSwappable(c.ctx, match):
@@ -1184,7 +1153,7 @@ func (c *Core) resendPendingRequests(t *trackedTrade) {
 		// Do not resend pending requests for revoked matches.
 		// Matches where we've refunded our swap or we auto-redeemed maker's
 		// swap will be set to revoked and will be skipped as well.
-		if match.swapErr != nil || proof.IsRevoked() {
+		if match.swapErr != nil || match.IsRevoked() {
 			continue
 		}
 		side, status := dbMatch.Side, dbMatch.Status
@@ -1235,43 +1204,44 @@ func (t *trackedTrade) revoke() {
 	t.maybeReturnCoins()
 }
 
-// revokeMatch sets the status as revoked for the specified match. revokeMatch
-// must be called with the mtx write-locked.
-func (t *trackedTrade) revokeMatch(matchID order.MatchID, fromServer bool) error {
-	var revokedMatch *matchTracker
-	for _, match := range t.matches {
-		if match.id == matchID {
-			revokedMatch = match
-			break
-		}
-	}
-	if revokedMatch == nil {
-		return fmt.Errorf("no match found with id %s for order %v", matchID, t.ID())
-	}
-
-	// Set the match as revoked.
-	if fromServer {
-		revokedMatch.MetaData.Proof.ServerRevoked = true
-	} else {
-		revokedMatch.MetaData.Proof.SelfRevoked = true
-	}
-	err := t.db.UpdateMatch(&revokedMatch.MetaMatch)
-	if err != nil {
-		t.dc.log.Errorf("db update error for revoked match %v, order %v: %v", matchID, t.ID(), err)
+// revokeMatch sets the status as revoked for the specified match, retires the
+// match if no further action is required for the match and returns any locked
+// coins if there won't be future matches for this trade AND no other match of
+// this trade requires sending a swap.
+//
+// revokeMatch must be called with the mtx write-locked.
+func (t *trackedTrade) revokeMatch(match *matchTracker, fromServer bool) {
+	retired := match.Revoke(fromServer)
+	t.dc.log.Warnf("Match %v revoked in status %v for order %v", match.id, match.Match.Status, t.ID())
+	if retired {
+		t.dc.log.Tracef("Revoked match %v (%v) in status %v considered inactive.",
+			match.id, match.Match.Side, match.Match.Status)
 	}
 
 	// Notify the user of the failed match.
 	corder := t.coreOrderInternal() // no cancel order
 	t.notify(newOrderNote(SubjectMatchRevoked, fmt.Sprintf("Match %s has been revoked",
-		token(matchID[:])), db.WarningLevel, corder))
+		token(match.id[:])), db.WarningLevel, corder))
 
 	// Unlock coins if we're not expecting future matches for this
 	// trade and there are no matches that MAY later require sending
 	// swaps.
 	t.maybeReturnCoins()
+}
 
-	t.dc.log.Warnf("Match %v revoked in status %v for order %v", matchID, revokedMatch.Match.Status, t.ID())
-	return nil
+// revokeMatchAndUpdateDB sets the status as revoked for the specified match,
+// retires the match if no further action is required for the match and saves
+// the updated match info to db. Locked coins are returned/unlocked if there
+// won't be future matches for this trade AND no other match of this trade
+// requires sending a swap.
+//
+// revokeMatchAndUpdateDB must be called with the mtx write-locked.
+func (t *trackedTrade) revokeMatchAndUpdateDB(match *matchTracker, fromServer bool) {
+	t.revokeMatch(match, fromServer)
+	err := t.db.UpdateMatch(&match.MetaMatch)
+	if err != nil {
+		t.dc.log.Errorf("db update error for revoked match %v, order %v: %v", match.id, t.ID(), err)
+	}
 }
 
 // swapMatches will send a transaction with swaps for the specified matches.
@@ -1343,7 +1313,7 @@ func (c *Core) swapMatchGroup(t *trackedTrade, matches []*matchTracker, errs *er
 	if t.metaData.Status > order.OrderStatusBooked {
 		var matchesRequiringSwaps int
 		for _, match := range t.matches {
-			if match.MetaData.Proof.IsRevoked() {
+			if match.IsRevoked() {
 				// Revoked matches don't require swaps.
 				continue
 			}
@@ -1659,18 +1629,26 @@ func (c *Core) redeemMatchGroup(t *trackedTrade, matches []*matchTracker, errs *
 		proof := &match.MetaData.Proof
 		coinID := []byte(coinIDs[i])
 		if match.Match.Side == order.Taker {
-			match.SetStatus(order.MatchComplete) // could this cause the match to be retired before the `redeem` request succeeds?
+			match.SetStatus(order.MatchComplete)
+			// match.MetaData.Retired = true // Don't retire until `redeem` request to DEX completes.
 			proof.TakerRedeem = coinID
 		} else {
 			match.SetStatus(order.MakerRedeemed)
 			proof.MakerRedeem = coinID
 		}
+		revoked := match.IsRevoked()
+		if revoked {
+			match.MetaData.Retired = true // Redemption or refund is the last step for revoked matches.
+		}
 		if err := t.db.UpdateMatch(&match.MetaMatch); err != nil {
 			errs.add("error storing swap details in database for match %s, coin %s: %v",
 				match.id, coinIDString(t.wallets.fromAsset.ID, coinID), err)
 		}
-
-		c.sendRedeemAsync(t, match, coinIDs[i], proof.Secret)
+		if !revoked {
+			// No need notifying the server if this match is revoked
+			// prior to broadcasting our redeem.
+			c.sendRedeemAsync(t, match, coinIDs[i], proof.Secret)
+		}
 	}
 }
 
@@ -1739,11 +1717,11 @@ func (c *Core) sendRedeemAsync(t *trackedTrade, match *matchTracker, coinID, sec
 		auth := &match.MetaData.Proof.Auth
 		auth.RedeemSig = ack.Sig
 		auth.RedeemStamp = encode.UnixMilliU(time.Now())
-		if match.Match.Side == order.Maker {
-			// As maker, this is the end. However, this diverges from server,
-			// which still needs taker's redeem.
-			match.SetStatus(order.MatchComplete)
-		}
+		// No further action is required on this match, retire.
+		// If we're maker, this status update diverges from server, which
+		// still needs taker's redeem before marking the match as complete.
+		match.SetStatus(order.MatchComplete)
+		match.MetaData.Retired = true
 		err = t.db.UpdateMatch(&match.MetaMatch)
 		if err != nil {
 			err = fmt.Errorf("error storing redeem ack sig in database: %v", err)
@@ -1809,7 +1787,7 @@ func (t *trackedTrade) findMakersRedemption(match *matchTracker) {
 		match.SetStatus(order.MakerRedeemed)
 		proof.MakerRedeem = []byte(redemptionCoinID)
 		proof.Secret = secret
-		proof.SelfRevoked = true // Set match as revoked.
+		t.revokeMatch(match, false) // self-revoke this match.
 		err = t.db.UpdateMatch(&match.MetaMatch)
 		if err != nil {
 			t.dc.log.Errorf("waitForRedemptions: error storing match info in database: %v", err)
@@ -1889,7 +1867,7 @@ func (t *trackedTrade) refundMatches(matches []*matchTracker) (uint64, error) {
 			refundedQty += calc.BaseToQuote(match.Match.Rate, match.Match.Quantity)
 		}
 		proof.RefundCoin = []byte(refundCoin)
-		proof.SelfRevoked = true // Set match as revoked.
+		t.revokeMatch(match, false) // self-revoke this match
 		err = t.db.UpdateMatch(&match.MetaMatch)
 		if err != nil {
 			errs.add("error storing match info in database: %v", err)
@@ -2216,7 +2194,7 @@ func (t *trackedTrade) maybeReturnCoins() bool {
 	// Status of all matches for the order. If a match exists for
 	// which a swap MAY be sent later, keep the coins locked.
 	for _, match := range t.matches {
-		if match.MetaData.Proof.IsRevoked() {
+		if match.IsRevoked() {
 			// Won't be sending swap for this match regardless of
 			// the match's status.
 			continue

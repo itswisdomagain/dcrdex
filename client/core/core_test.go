@@ -1789,13 +1789,13 @@ func TestLogin(t *testing.T) {
 		t.Errorf("automatic cancel order not linked")
 	}
 
-	if !tracker.matches[missingID].MetaData.Proof.SelfRevoked {
+	if !tracker.matches[missingID].SelfRevoked() {
 		t.Errorf("SelfRevoked not true for missing match tracker")
 	}
 	if tracker.matches[matchID].swapErr != nil {
 		t.Errorf("swapErr set for non-missing match tracker")
 	}
-	if tracker.matches[matchID].MetaData.Proof.IsRevoked() {
+	if tracker.matches[matchID].IsRevoked() {
 		t.Errorf("IsRevoked true for non-missing match tracker")
 	}
 	// Conflict resolution will have run negotiate on the extra match from the
@@ -1803,8 +1803,9 @@ func TestLogin(t *testing.T) {
 	if len(tracker.matches) != 3 {
 		t.Errorf("Extra trade not accepted into matches")
 	}
-	tracker.mtx.Lock()
-	defer tracker.mtx.Unlock()
+	time.Sleep(time.Second) // conflict resolution performs contract audit and updates CounterScript in bg
+	tracker.mtx.RLock()
+	defer tracker.mtx.RUnlock()
 	match = tracker.matches[extraID]
 	if !bytes.Equal(match.MetaData.Proof.CounterScript, missedContract) {
 		t.Errorf("Missed maker contract not retrieved, %s, %s", match.id, hex.EncodeToString(match.MetaData.Proof.CounterScript))
@@ -2824,7 +2825,8 @@ func TestTradeTracking(t *testing.T) {
 	}
 
 	// Check expiration error.
-	match.MetaData.Proof.SelfRevoked = true // keeps trying unless revoked
+	proofCopy := match.MetaData.Proof // copy unrevoked state
+	match.Revoke(false)               // keeps trying unless revoked
 	tBtcWallet.auditErr = asset.CoinNotFoundError
 	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
 	if err == nil {
@@ -2835,7 +2837,7 @@ func TestTradeTracking(t *testing.T) {
 		t.Fatalf("wrong error type. expecting ExpirationTimeout, got %T: %v", err, err)
 	}
 	tBtcWallet.auditErr = nil
-	match.MetaData.Proof.SelfRevoked = false
+	match.MetaData.Proof = proofCopy // reset to unrevoked state
 
 	auditInfo.Coin.(*tCoin).val = auditQty - 1
 	err = tracker.auditContract(match, audit.CoinID, audit.Contract)
@@ -3560,12 +3562,12 @@ func TestRefunds(t *testing.T) {
 	}
 	checkStatus("taker matched", match, order.NewlyMatched)
 	// Send through the audit request for the maker's init.
-	rig.db.setUpdateMatchHook(mid, make(chan order.MatchStatus, 1))
 	audit, auditInfo = tMsgAudit(loid, mid, addr, matchSize, nil)
 	tBtcWallet.auditInfo = auditInfo
 	auditInfo.Expiration = encode.DropMilliseconds(matchTime.Add(tracker.lockTimeMaker))
 	tBtcWallet.auditErr = nil
 	msg, _ = msgjson.NewRequest(1, msgjson.AuditRoute, audit)
+	rig.db.setUpdateMatchHook(mid, make(chan order.MatchStatus, 1))
 	err = handleAuditRoute(tCore, rig.dc, msg)
 	if err != nil {
 		t.Fatalf("taker's match message error: %v", err)
@@ -3948,18 +3950,13 @@ func TestCompareServerMatches(t *testing.T) {
 	// an inactive match for the missing trade
 	matchIDMissingInactive := ordertest.RandomMatchID()
 	missingTradeMatchInactive := &matchTracker{
+		id: matchIDMissingInactive,
 		MetaMatch: db.MetaMatch{
 			Match: &order.UserMatch{
 				MatchID: matchIDMissingInactive,
-				Status:  order.MatchComplete,
 			},
 			MetaData: &db.MatchMetaData{
-				Status: order.MatchComplete,
-				Proof: db.MatchProof{
-					Auth: db.MatchAuth{
-						RedeemSig: []byte{1, 2, 3}, // won't be considered complete with out it
-					},
-				},
+				Retired: true,
 			},
 		},
 		counterConfirms: 1,
@@ -5515,7 +5512,7 @@ func TestMatchStatusResolution(t *testing.T) {
 		if newStatus == tt.ours {
 			t.Fatalf("(%s) status not updated for forward resolution path", testName(tt))
 		}
-		if match.MetaData.Proof.SelfRevoked {
+		if match.SelfRevoked() {
 			t.Fatalf("(%s) match self-revoked during forward resolution", testName(tt))
 		}
 	}
@@ -5552,7 +5549,7 @@ func TestMatchStatusResolution(t *testing.T) {
 		if newStatus != tt.ours {
 			t.Fatalf("(%s) status changed for backwards resolution path", testName(tt))
 		}
-		if match.MetaData.Proof.SelfRevoked {
+		if match.SelfRevoked() {
 			t.Fatalf("(%s) match self-revoked during backwards resolution", testName(tt))
 		}
 	}
@@ -5712,7 +5709,7 @@ func TestMatchStatusResolution(t *testing.T) {
 
 	for _, tt := range nonsense {
 		runTest(tt)
-		if !match.MetaData.Proof.SelfRevoked {
+		if !match.SelfRevoked() {
 			t.Fatalf("(%s) match not self-revoked during nonsense resolution", testName(tt))
 		}
 	}

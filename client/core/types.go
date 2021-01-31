@@ -218,7 +218,7 @@ func matchFromMetaMatchWithConfs(ord order.Order, metaMatch *db.MetaMatch, swapC
 		swap = NewCoin(fromID, swapCoin)
 		if (side == order.Taker && status == order.TakerSwapCast) ||
 			(side == order.Maker && status == order.MakerSwapCast) &&
-				!proof.IsRevoked() && swapReq > 0 {
+				!metaMatch.IsRevoked() && swapReq > 0 {
 
 			swap.SetConfirmations(swapConfs, swapReq)
 		}
@@ -227,7 +227,7 @@ func matchFromMetaMatchWithConfs(ord order.Order, metaMatch *db.MetaMatch, swapC
 		counterSwap = NewCoin(toID, counterSwapCoin)
 		if (side == order.Maker && status == order.TakerSwapCast) ||
 			(side == order.Taker && status == order.MakerSwapCast) &&
-				!proof.IsRevoked() && counterReq > 0 {
+				!metaMatch.IsRevoked() && counterReq > 0 {
 
 			counterSwap.SetConfirmations(counterSwapConfs, counterReq)
 		}
@@ -243,7 +243,7 @@ func matchFromMetaMatchWithConfs(ord order.Order, metaMatch *db.MetaMatch, swapC
 	match := &Match{
 		MatchID:       userMatch.MatchID[:],
 		Status:        userMatch.Status,
-		Revoked:       proof.IsRevoked(),
+		Revoked:       metaMatch.IsRevoked(),
 		Rate:          userMatch.Rate,
 		Qty:           userMatch.Quantity,
 		Side:          userMatch.Side,
