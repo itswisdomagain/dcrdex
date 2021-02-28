@@ -9,6 +9,7 @@ import (
 
 	dexdb "decred.org/dcrdex/client/db"
 	"decred.org/dcrdex/dex/encode"
+	"decred.org/dcrdex/dex/order"
 	"go.etcd.io/bbolt"
 )
 
@@ -23,6 +24,10 @@ var upgrades = [...]upgradefunc{
 	// v1 => v2 adds a MaxFeeRate field to the OrderMetaData, used for match
 	// validation.
 	v2Upgrade,
+	// v2 => v3 adds a Retired field to the MatchMetaData, to provide a more
+	// straightforward way of determining completed matches without performing
+	// extensive checks on a match.
+	v3Upgrade,
 }
 
 // DBVersion is the latest version of the database that is understood. Databases
@@ -187,6 +192,83 @@ func v2Upgrade(dbtx *bbolt.Tx) error {
 			return fmt.Errorf("order %x bucket is not a bucket", oid)
 		}
 		return oBkt.Put(maxFeeRateKey, maxFeeB)
+	})
+}
+
+// v3Upgrade adds a Retired field to the MatchMetaData. The upgrade sets the
+// Retired field appropriately for all historical matches, providing a more
+// straightforward way of determining completed matches without performing
+// extensive checks on a match.
+func v3Upgrade(dbtx *bbolt.Tx) error {
+	const oldVersion = 2
+
+	dbVersion, err := fetchDBVersion(dbtx)
+	if err != nil {
+		return fmt.Errorf("error fetching database version: %w", err)
+	}
+
+	if dbVersion != oldVersion {
+		return fmt.Errorf("v3Upgrade inappropriately called on db version %d", dbVersion)
+	}
+
+	// Upgrade the match metadata. Set Retired to true if (1) status is
+	// MatchComplete and Proof.RedeemSig is set, (2) match is refunded,
+	// or (3) match is revoked and this side of the match requires no
+	// further action like refund or auto-redeem.
+	matches := dbtx.Bucket(matchesBucket)
+	return matches.ForEach(func(k, _ []byte) error {
+		mBkt := matches.Bucket(k)
+		if mBkt == nil {
+			return fmt.Errorf("match %x bucket is not a bucket", k)
+		}
+		// We need the proof to confirm if this match is completed.
+		proofB := getCopy(mBkt, proofKey)
+		if len(proofB) == 0 {
+			return fmt.Errorf("empty match proof")
+		}
+		proof, err := dexdb.DecodeMatchProof(proofB)
+		if err != nil {
+			return fmt.Errorf("error decoding proof: %w", err)
+		}
+		// Retire if refunded.
+		if len(proof.RefundCoin) > 0 {
+			return mBkt.Put(retiredKey, byteTrue)
+		}
+		// Retire if status=MatchComplete and Proof.RedeemSig is set.
+		statusB := mBkt.Get(statusKey)
+		if len(statusB) != 1 {
+			return fmt.Errorf("match %x has no status set", k)
+		}
+		status := order.MatchStatus(statusB[0])
+		if status == order.MatchComplete && len(proof.Auth.RedeemSig) != 0 {
+			return mBkt.Put(retiredKey, byteTrue)
+		}
+		// Retire if revoked without requiring further action.
+		// TakerSwapCast match status requires action on both sides.
+		if proof.IsRevoked() && status != order.TakerSwapCast {
+			// NewlyMatched requires no further action from either side.
+			if status == order.NewlyMatched {
+				return mBkt.Put(retiredKey, byteTrue)
+			}
+			// Load the UserMatch to check the match Side.
+			matchB := mBkt.Get(matchKey) // no copy, just need Side
+			if matchB == nil {
+				return fmt.Errorf("nil match bytes for %x", k)
+			}
+			match, err := order.DecodeMatch(matchB)
+			if err != nil {
+				return fmt.Errorf("error decoding match %x: %v", k, err)
+			}
+			side := match.Side // done with match and matchB
+
+			// MakerSwapCast requires no further action from the taker.
+			// MakerRedeemed requires no further action from the maker.
+			if (status == order.MakerSwapCast && side == order.Taker) ||
+				(status == order.MakerRedeemed && side == order.Maker) {
+				return mBkt.Put(retiredKey, byteTrue)
+			}
+		}
+		return mBkt.Put(retiredKey, byteFalse) // still active
 	})
 }
 

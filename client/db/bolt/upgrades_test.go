@@ -6,6 +6,7 @@ package bolt
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -15,69 +16,46 @@ import (
 	"testing"
 	"time"
 
+	"decred.org/dcrdex/dex/encode"
 	"go.etcd.io/bbolt"
 )
 
-type upgradeValidator struct {
-	upgrade upgradefunc
-	verify  func(*testing.T, *bbolt.DB)
-	expVer  uint32
-}
-
-var validators = []upgradeValidator{
-	{v1Upgrade, verifyV1Upgrade, 1},
-	{v2Upgrade, verifyV2Upgrade, 2},
-}
-
-// The indices of the archives here in outdatedDBs should match the first
-// eligible validator for the database.
-var outdatedDBs = []string{
-	"v0.db.gz", "v1.db.gz",
+var dbUpgradeTests = [...]struct {
+	name       string
+	upgrade    upgradefunc
+	verify     func(*testing.T, *bbolt.DB)
+	filename   string // in testdata directory
+	newVersion uint32
+}{
+	{"upgradeFromV0", v1Upgrade, verifyV1Upgrade, "v0.db.gz", 1},
+	{"upgradeFromV1", v2Upgrade, verifyV2Upgrade, "v1.db.gz", 2},
+	{"upgradeFromV2", v3Upgrade, verifyV3Upgrade, "v2.db.gz", 3},
 }
 
 func TestUpgrades(t *testing.T) {
-	d, err := ioutil.TempDir("", "dcrdex_test_upgrades")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(d)
-
-	for i, archiveName := range outdatedDBs {
-		dbPath, close := unpack(t, archiveName)
-		defer close()
-		db, err := bbolt.Open(dbPath, 0600,
-			&bbolt.Options{Timeout: 1 * time.Second})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer db.Close()
-
-		// Do every validator from the db index up.
-		for j := i; j < len(validators); j++ {
-			validator := validators[j]
-			err = db.Update(func(dbtx *bbolt.Tx) error {
-				return doUpgrade(dbtx, validator.upgrade, validator.expVer)
+	t.Run("group", func(t *testing.T) {
+		for _, tc := range dbUpgradeTests {
+			tc := tc // capture range variable
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				dbPath, close := unpack(t, tc.filename)
+				defer close()
+				db, err := bbolt.Open(dbPath, 0600,
+					&bbolt.Options{Timeout: 1 * time.Second})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				err = db.Update(func(dbtx *bbolt.Tx) error {
+					return doUpgrade(dbtx, tc.upgrade, tc.newVersion)
+				})
+				if err != nil {
+					t.Fatalf("Upgrade failed: %v", err)
+				}
+				tc.verify(t, db)
 			})
-			if err != nil {
-				t.Fatalf("Upgrade failed: %v", err)
-			}
-
-			var ver uint32
-			err = db.View(func(tx *bbolt.Tx) error {
-				ver, err = getVersionTx(tx)
-				return err
-			})
-			if err != nil {
-				t.Fatalf("Error retrieving version: %v", err)
-			}
-
-			if ver != validator.expVer {
-				t.Fatalf("Wrong version. Expected %d, got %d", validator.expVer, ver)
-			}
-
-			validator.verify(t, db)
 		}
-	}
+	})
 }
 
 func TestUpgradeDB(t *testing.T) {
@@ -103,8 +81,8 @@ func TestUpgradeDB(t *testing.T) {
 		return nil
 	}
 
-	for v, archiveName := range outdatedDBs {
-		err := runUpgrade(archiveName)
+	for v, tc := range dbUpgradeTests {
+		err := runUpgrade(tc.filename)
 		if err != nil {
 			t.Fatalf("upgrade error for version %d database: %v", v, err)
 		}
@@ -141,6 +119,39 @@ func verifyV2Upgrade(t *testing.T, db *bbolt.DB) {
 			}
 			if !bytes.Equal(oBkt.Get(maxFeeRateKey), maxFeeB) {
 				return fmt.Errorf("max fee not upgraded")
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func verifyV3Upgrade(t *testing.T, db *bbolt.DB) {
+	verifyMatches := map[string]bool{
+		"090f54bc6b13652d4e4c23ec94b4f70751c61db043ae732c014d0f5cf4ccccb7": false, // status < MatchComplete, not revoked, not refunded
+		"5ee45ebb29edf84ab2a7f35aef619b20c3e2cd26017a5e281e7cc1bfde0ed435": true,  // status < MatchComplete, revoked at NewlyMatched
+		"84455dae423b09f149396f09b6063380eeb312e1b67051a695e78cd5c985cb49": false, // status == MakerSwapCast, side Maker, revoked, requires refund
+		"59c054d537fbd98f51621671a84d25b55350d0e33a6b3c2c4abd874054f8a438": true,  // status == TakerSwapCast, side Maker, revoked, refunded
+		"f153a3b8d5824c3e237911cd1b108dfb2e04555f6c5899681d182216caa328fc": false, // status == MatchComplete, no RedeemSig
+		"3996ffea2a3db99262b954cf6dcf883f562baf273d767b7cf91b6aacddd4206f": true,  // status == MatchComplete, RedeemSig set
+	}
+
+	err := db.View(func(dbtx *bbolt.Tx) error {
+		matches := dbtx.Bucket(matchesBucket)
+		return matches.ForEach(func(k, v []byte) error {
+			matchID := hex.EncodeToString(k)
+			mBkt := matches.Bucket(k)
+			if mBkt == nil {
+				return fmt.Errorf("match %s bucket is not a bucket", matchID)
+			}
+			retiredB := mBkt.Get(retiredKey)
+			retired := bytes.Equal(retiredB, encode.ByteTrue)
+			if expectRetired, ok := verifyMatches[matchID]; !ok {
+				return fmt.Errorf("found unexpected match %s", matchID)
+			} else if retired != expectRetired {
+				return fmt.Errorf("expected match %s retired = %t, got %t", matchID, expectRetired, retired)
 			}
 			return nil
 		})

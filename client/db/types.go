@@ -222,10 +222,10 @@ func (m *MetaMatch) Revoke(fromServer bool) bool {
 	m.MetaData.Proof.selfRevoked = !fromServer
 
 	// Retire this match if no further action (refund or auto-redeem)
-	// is necessary. This should not be applied to cancel order matches.
+	// is necessary.
 	wasRetired := m.MetaData.Retired
 	status, side := m.Match.Status, m.Match.Side
-	m.MetaData.Retired = m.Match.Address == "" || // cancel order match
+	m.MetaData.Retired = m.Match.Address == "" || // cancel order match, requires no further action
 		status == order.NewlyMatched || // no swap sent yet, no recovery required
 		(status == order.MakerSwapCast && side == order.Taker) || // we're taker, haven't sent swap, no recovery required
 		(side == order.Maker && status == order.MakerRedeemed) || // we're maker and we've redeemed, no recovery required
@@ -246,7 +246,7 @@ func (m *MetaMatch) ServerRevoked() bool {
 
 // IsRevoked returns true if this match has been self- or server-revoked.
 func (m *MetaMatch) IsRevoked() bool {
-	return m.SelfRevoked() || m.ServerRevoked()
+	return m.MetaData.Proof.IsRevoked()
 }
 
 // MatchMetaData is important auxiliary information about the match.
@@ -300,6 +300,11 @@ type MatchProof struct {
 	Auth          MatchAuth
 	serverRevoked bool
 	selfRevoked   bool
+}
+
+// IsRevoked is true if either serverRevoked or selfRevoked is true.
+func (p *MatchProof) IsRevoked() bool {
+	return p.serverRevoked || p.selfRevoked
 }
 
 // Encode encodes the MatchProof to a versioned blob.
