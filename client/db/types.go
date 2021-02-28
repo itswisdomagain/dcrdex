@@ -216,10 +216,15 @@ func (m *MetaMatch) ID() []byte {
 // action is required. Recovery actions may be required for a revoked match
 // if the client has broadcasted a swap contract and has not redeemed the
 // counter-party's contract or refunded own swap.
-// Returns whether or not the match is retired by this revocation action.
+// Returns true if this match becomes newly retired or false if previously
+// retired or isn't yet retired. The return value should be checked to avoid
+// sending repeated match revoked notifications.
 func (m *MetaMatch) Revoke(fromServer bool) bool {
-	m.MetaData.Proof.serverRevoked = fromServer
-	m.MetaData.Proof.selfRevoked = !fromServer
+	if fromServer {
+		m.MetaData.Proof.serverRevoked = true
+	} else /*if !m.MetaData.Proof.serverRevoked*/ { // TODO: Maybe don't allow self-revoke if already server-revoked.
+		m.MetaData.Proof.selfRevoked = true
+	}
 
 	// Retire this match if no further action (refund or auto-redeem)
 	// is necessary.
