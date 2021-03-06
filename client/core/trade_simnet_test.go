@@ -1010,8 +1010,8 @@ func monitorTrackedTrade(ctx context.Context, client *tClient, tracker *trackedT
 				// Our toAsset == counter-party's fromAsset.
 				assetToMine, swapOrRedeem = tracker.wallets.toAsset, "swap"
 
-			case status == order.MatchComplete, // maker normally jumps MakerRedeemed if 'redeem' succeeds
-				side == order.Maker && status == order.MakerRedeemed:
+			case side == order.Maker && status == order.MakerRedeemed,
+				side == order.Taker && status == order.MatchComplete:
 				recordBalanceChanges(tracker.wallets.toAsset.ID, false, match.Match.Quantity, match.Match.Rate)
 				// Mine blocks for redemption since counter-party does not wait
 				// for redeem tx confirmations before performing follow-up action.
