@@ -9,6 +9,7 @@ import (
 
 	"decred.org/dcrdex/dex"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/gcs/v3"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v3"
 )
 
@@ -18,26 +19,46 @@ type Block struct {
 	Height       int64
 	PreviousHash string
 	Vote         bool // stakeholder vote result for the previous block
+	TxIDs        []string
+	Txs          []*chainjson.TxRawResult
 }
 
 // BlockCache caches block information to prevent repeated calls to
-// rpcclient.GetblockVerbose.
+// rpcclient.GetblockVerbose. Also caches block v2 cfilters.
 type BlockCache struct {
-	mtx       sync.RWMutex
+	log dex.Logger
+
+	blocksMtx sync.RWMutex
 	blocks    map[chainhash.Hash]*Block
 	mainchain map[int64]*chainhash.Hash
 	bestBlock struct {
 		hash   *chainhash.Hash
 		height int64
 	}
-	log dex.Logger
+
+	filterMtx sync.RWMutex
+	filters   map[chainhash.Hash]*BlockFilter
+}
+
+type BlockFilter struct {
+	v2cfilters *gcs.FilterV2
+	key        [gcs.KeySize]byte
+}
+
+func (bf *BlockFilter) Match(data []byte) bool {
+	return bf.v2cfilters.Match(bf.key, data)
+}
+
+func (bf *BlockFilter) MatchAny(data [][]byte) bool {
+	return bf.v2cfilters.MatchAny(bf.key, data)
 }
 
 func NewBlockCache(log dex.Logger) *BlockCache {
 	return &BlockCache{
+		log:       log,
 		blocks:    make(map[chainhash.Hash]*Block),
 		mainchain: make(map[int64]*chainhash.Hash),
-		log:       log,
+		filters:   make(map[chainhash.Hash]*BlockFilter),
 	}
 }
 
@@ -45,8 +66,8 @@ func NewBlockCache(log dex.Logger) *BlockCache {
 // to a *Block, returning the *Block. If the block is not orphaned, it will be
 // added to the mainchain.
 func (cache *BlockCache) Add(block *chainjson.GetBlockVerboseResult) (*Block, error) {
-	cache.mtx.Lock()
-	defer cache.mtx.Unlock()
+	cache.blocksMtx.Lock()
+	defer cache.blocksMtx.Unlock()
 
 	hash, err := chainhash.NewHashFromStr(block.Hash)
 	if err != nil {
@@ -58,6 +79,13 @@ func (cache *BlockCache) Add(block *chainjson.GetBlockVerboseResult) (*Block, er
 		Height:       block.Height,
 		PreviousHash: block.PreviousHash,
 		Vote:         block.VoteBits&1 != 0,
+		TxIDs:        append(block.Tx, block.STx...),
+	}
+	for i := range block.RawTx {
+		blk.Txs = append(blk.Txs, &block.RawTx[i])
+	}
+	for i := range block.RawSTx {
+		blk.Txs = append(blk.Txs, &block.RawSTx[i])
 	}
 	cache.blocks[*hash] = blk
 
@@ -73,10 +101,30 @@ func (cache *BlockCache) Add(block *chainjson.GetBlockVerboseResult) (*Block, er
 	return blk, nil
 }
 
+// AddCFilter adds the provided block filters to the cache.
+func (cache *BlockCache) AddCFilter(blockHash *chainhash.Hash, v2cfilters *gcs.FilterV2, key [gcs.KeySize]byte) *BlockFilter {
+	cache.filterMtx.Lock()
+	defer cache.filterMtx.Unlock()
+	bf := &BlockFilter{
+		v2cfilters: v2cfilters,
+		key:        key,
+	}
+	cache.filters[*blockHash] = bf
+	return bf
+}
+
+// Tip returns the best known block hash and height for the blockCache.
+func (cache *BlockCache) BlockFilter(blockHash *chainhash.Hash) (*BlockFilter, bool) {
+	cache.filterMtx.RLock()
+	defer cache.filterMtx.RUnlock()
+	filter, found := cache.filters[*blockHash]
+	return filter, found
+}
+
 // Tip returns the best known block hash and height for the blockCache.
 func (cache *BlockCache) Tip() (*chainhash.Hash, int64) {
-	cache.mtx.RLock()
-	defer cache.mtx.RUnlock()
+	cache.blocksMtx.RLock()
+	defer cache.blocksMtx.RUnlock()
 	return cache.bestBlock.hash, cache.bestBlock.height
 }
 
@@ -84,8 +132,8 @@ func (cache *BlockCache) Tip() (*chainhash.Hash, int64) {
 // This method does not attempt to fetch the required hash from the blockchain
 // if it is not cached.
 func (cache *BlockCache) MainchainHash(blockHeight int64) (*chainhash.Hash, bool) {
-	cache.mtx.RLock()
-	defer cache.mtx.RUnlock()
+	cache.blocksMtx.RLock()
+	defer cache.blocksMtx.RUnlock()
 	hash, found := cache.mainchain[blockHeight]
 	return hash, found
 }
@@ -105,8 +153,8 @@ func (cache *BlockCache) BlockAt(height int64) (*Block, bool) {
 // method does not attempt to fetch the required hash from the blockchain if it
 // is not cached.
 func (cache *BlockCache) Block(hash *chainhash.Hash) (*Block, bool) {
-	cache.mtx.RLock()
-	defer cache.mtx.RUnlock()
+	cache.blocksMtx.RLock()
+	defer cache.blocksMtx.RUnlock()
 	block, found := cache.blocks[*hash]
 	return block, found
 }
@@ -122,8 +170,8 @@ func (cache *BlockCache) PurgeMainchainBlocks(fromHeight int64) {
 		return
 	}
 
-	cache.mtx.Lock()
-	defer cache.mtx.Unlock()
+	cache.blocksMtx.Lock()
+	defer cache.blocksMtx.Unlock()
 	for blockHeight := fromHeight; blockHeight <= cache.bestBlock.height; blockHeight++ {
 		delete(cache.mainchain, blockHeight)
 	}
@@ -132,10 +180,14 @@ func (cache *BlockCache) PurgeMainchainBlocks(fromHeight int64) {
 
 // Reset resets the block cache.
 func (cache *BlockCache) Reset() {
-	cache.mtx.Lock()
-	defer cache.mtx.Unlock()
+	cache.blocksMtx.Lock()
+	defer cache.blocksMtx.Unlock()
+	cache.filterMtx.Lock()
+	defer cache.filterMtx.Unlock()
+
 	cache.blocks = make(map[chainhash.Hash]*Block)
 	cache.mainchain = make(map[int64]*chainhash.Hash)
+	cache.filters = make(map[chainhash.Hash]*BlockFilter)
 	cache.clearBestBlock()
 }
 

@@ -37,6 +37,8 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v3/ecdsa"
 	"github.com/decred/dcrd/dcrjson/v3"
 	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/gcs/v3"
+	"github.com/decred/dcrd/gcs/v3/blockcf2"
 	chainjson "github.com/decred/dcrd/rpc/jsonrpc/types/v3"
 	"github.com/decred/dcrd/rpcclient/v7"
 	"github.com/decred/dcrd/txscript/v4"
@@ -61,6 +63,7 @@ const (
 	splitTxBaggage = dexdcr.MsgTxOverhead + dexdcr.P2PKHInputSize + 2*dexdcr.P2PKHOutputSize
 
 	// RawRequest RPC methods
+	methodGetCFilterV2       = "getcfilterv2"
 	methodListUnspent        = "listunspent"
 	methodListLockUnspent    = "listlockunspent"
 	methodSignRawTransaction = "signrawtransaction"
@@ -647,7 +650,7 @@ func (dcr *ExchangeWallet) initBestBlock() error {
 	if err != nil {
 		return fmt.Errorf("error getting best block: %w", err)
 	}
-	_, err = dcr.getDcrBlock(bestBlock.hash)
+	_, err = dcr.getDcrBlock(bestBlock.hash, false)
 	if err != nil {
 		return fmt.Errorf("error priming the block cache: %w", err)
 	}
@@ -1793,7 +1796,7 @@ func (dcr *ExchangeWallet) queueFindRedemptionRequest(ctx context.Context, contr
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid blockhash %s for contract %s: %w", tx.BlockHash, contractOutpoint.String(), err)
 		}
-		txBlock, err := dcr.getDcrBlock(blockHash)
+		txBlock, err := dcr.getDcrBlock(blockHash, false)
 		if err != nil {
 			return nil, nil, fmt.Errorf("error fetching verbose block %s for contract %s: %w",
 				tx.BlockHash, contractOutpoint.String(), translateRPCCancelErr(err))
@@ -1877,9 +1880,8 @@ func (dcr *ExchangeWallet) findRedemptionsInBlockRange(startBlock, endBlock *blo
 	var totalFound, totalCanceled int
 
 rangeBlocks:
-	for nextBlockHash != nil && lastScannedBlockHeight < endBlock.height {
-		// TODO: Use blockCache.
-		blk, err := dcr.node.GetBlockVerbose(dcr.ctx, nextBlockHash, true)
+	for {
+		blk, err := dcr.getDcrBlock(nextBlockHash, true)
 		if err != nil {
 			// Redemption search for this set of contracts is compromised. Notify
 			// the redemption finder(s) of this fatal error and cancel redemption
@@ -1891,10 +1893,7 @@ rangeBlocks:
 			return
 		}
 		scanPoint := fmt.Sprintf("block %d", blk.Height)
-		lastScannedBlockHeight = blk.Height
-		blkTxs := append(blk.RawTx, blk.RawSTx...)
-		for t := range blkTxs {
-			tx := &blkTxs[t]
+		for _, tx := range blk.Txs {
 			found, canceled := dcr.findRedemptionsInTx(scanPoint, tx, contractOutpoints)
 			totalFound += found
 			totalCanceled += canceled
@@ -1902,15 +1901,15 @@ rangeBlocks:
 				break rangeBlocks
 			}
 		}
-		if blk.NextHash == "" {
-			nextBlockHash = nil
-		} else {
-			nextBlockHash, err = chainhash.NewHashFromStr(blk.NextHash)
-			if err != nil {
-				err = fmt.Errorf("hash decode error %s: %w", blk.NextHash, err)
-				dcr.fatalFindRedemptionsError(err, contractOutpoints)
-				return
-			}
+		if blk.Height >= endBlock.height {
+			break
+		}
+		lastScannedBlockHeight = blk.Height
+		nextBlockHash, err = dcr.getBlockHash(blk.Height + 1)
+		if err != nil {
+			err = fmt.Errorf("error getting hash for block %d: %v", blk.Height+1, err)
+			dcr.fatalFindRedemptionsError(err, contractOutpoints)
+			return
 		}
 	}
 
@@ -2806,16 +2805,48 @@ func (dcr *ExchangeWallet) getBlockHash(height int64) (*chainhash.Hash, error) {
 }
 
 // Get the block information, checking the cache first.
-func (dcr *ExchangeWallet) getDcrBlock(blockHash *chainhash.Hash) (*dexdcr.Block, error) {
+func (dcr *ExchangeWallet) getDcrBlock(blockHash *chainhash.Hash, includeTxs bool) (*dexdcr.Block, error) {
 	cachedBlock, found := dcr.blockCache.Block(blockHash)
 	if found {
-		return cachedBlock, nil
+		// Only return the cached block if the caller does not need the block txs
+		// or if the block txs are cached as well.
+		if !includeTxs || len(cachedBlock.Txs) > 0 {
+			return cachedBlock, nil
+		}
 	}
-	blockVerbose, err := dcr.node.GetBlockVerbose(dcr.ctx, blockHash, false)
+	blockVerbose, err := dcr.node.GetBlockVerbose(dcr.ctx, blockHash, includeTxs)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving block %s: %w", blockHash, translateRPCCancelErr(err))
 	}
 	return dcr.blockCache.Add(blockVerbose)
+}
+
+// Get the block v2filter, checking the cache first.
+func (dcr *ExchangeWallet) getBlockFilterV2(blockHash *chainhash.Hash) (*dexdcr.BlockFilter, error) {
+	if filter, cached := dcr.blockCache.BlockFilter(blockHash); cached {
+		return filter, nil
+	}
+
+	var blockCf2 walletjson.GetCFilterV2Result
+	err := dcr.nodeRawRequest(methodGetCFilterV2, anylist{blockHash.String()}, &blockCf2)
+	if err != nil {
+		return nil, err
+	}
+	filterB, err := hex.DecodeString(blockCf2.Filter)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding block filter: %w", err)
+	}
+	keyB, err := hex.DecodeString(blockCf2.Key)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding block filter key: %w", err)
+	}
+	filter, err := gcs.FromBytesV2(blockcf2.B, blockcf2.M, filterB)
+	if err != nil {
+		return nil, fmt.Errorf("error deserializing block filter: %w", err)
+	}
+	var bcf2Key [gcs.KeySize]byte
+	copy(bcf2Key[:], keyB)
+	return dcr.blockCache.AddCFilter(blockHash, filter, bcf2Key), nil
 }
 
 // wireBytes dumps the serialized transaction bytes.

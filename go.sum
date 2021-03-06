@@ -153,8 +153,8 @@ github.com/gorilla/websocket v1.4.2/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/ad
 github.com/hpcloud/tail v1.0.0/go.mod h1:ab1qPbhIpdTxEkNHXyeSf5vhxWSCs/tWer42PpOxQnU=
 github.com/improbable-eng/grpc-web v0.9.1/go.mod h1:6hRR09jOEG81ADP5wCQju1z71g6OL4eEvELdran/3cs=
 github.com/improbable-eng/grpc-web v0.13.0/go.mod h1:6hRR09jOEG81ADP5wCQju1z71g6OL4eEvELdran/3cs=
-github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210203133250-b3f470a90b70 h1:weCQjDQ5AdX2nfbVifU7CfYM1e6iOdNpV016pWElHD8=
-github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210203133250-b3f470a90b70/go.mod h1:a/gCARd0EX8yS4iML21MQME75+bxtaGqVKjgCPAXeno=
+github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210204070427-be1c4c311caf h1:h4BvCbRYZQMmnDN7mL9e2dh+dkiG8EG2yZbqlahU2lw=
+github.com/itswisdomagain/dcrwallet/v2 v2.0.0-20210204070427-be1c4c311caf/go.mod h1:a/gCARd0EX8yS4iML21MQME75+bxtaGqVKjgCPAXeno=
 github.com/jessevdk/go-flags v0.0.0-20141203071132-1679536dcc89/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=
 github.com/jessevdk/go-flags v0.0.0-20181221193153-c0795c8afcf4/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=
 github.com/jessevdk/go-flags v1.4.0/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=
