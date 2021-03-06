@@ -107,7 +107,7 @@ type Backend struct {
 	blockChans map[chan *asset.BlockUpdate]struct{}
 	// The block cache stores just enough info about the blocks to prevent future
 	// calls to GetBlockVerbose.
-	blockCache *blockCache
+	blockCache *dexdcr.BlockCache
 	// A logger will be provided by the DEX. All logging should use the provided
 	// logger.
 	log dex.Logger
@@ -121,7 +121,7 @@ var _ asset.Backend = (*Backend)(nil)
 func unconnectedDCR(logger dex.Logger, cfg *config) *Backend {
 	return &Backend{
 		cfg:        cfg,
-		blockCache: newBlockCache(logger),
+		blockCache: dexdcr.NewBlockCache(logger),
 		log:        logger,
 		blockChans: make(map[chan *asset.BlockUpdate]struct{}),
 	}
@@ -517,9 +517,9 @@ func (dcr *Backend) transaction(txHash *chainhash.Hash, verboseTx *chainjson.TxR
 	var blockHash *chainhash.Hash
 	var lastLookup *chainhash.Hash
 	if verboseTx.BlockHash == "" {
-		tipHash := dcr.blockCache.tipHash()
-		if tipHash != zeroHash {
-			lastLookup = &tipHash
+		tipHash, _ := dcr.blockCache.Tip()
+		if tipHash != nil {
+			lastLookup = tipHash
 		}
 	} else {
 		blockHash, err = chainhash.NewHashFromStr(verboseTx.BlockHash)
@@ -587,7 +587,7 @@ func (dcr *Backend) run(ctx context.Context) {
 	blockPoll := time.NewTicker(blockPollInterval)
 	defer blockPoll.Stop()
 	addBlock := func(block *chainjson.GetBlockVerboseResult, reorg bool) {
-		_, err := dcr.blockCache.add(block)
+		_, err := dcr.blockCache.Add(block)
 		if err != nil {
 			dcr.log.Errorf("error adding new best block to cache: %v", err)
 		}
@@ -638,13 +638,13 @@ out:
 	for {
 		select {
 		case <-blockPoll.C:
-			tip := dcr.blockCache.tip()
+			tipHash, tipHeight := dcr.blockCache.Tip()
 			bestHash, err := dcr.node.GetBestBlockHash(ctx)
 			if err != nil {
 				sendErr(asset.NewConnectionError("error retrieving best block: %w", translateRPCCancelErr(err)))
 				continue
 			}
-			if *bestHash == tip.hash {
+			if bestHash.IsEqual(tipHash) {
 				continue
 			}
 
@@ -661,7 +661,7 @@ out:
 				continue
 			}
 			// If it builds on the best block or the cache is empty, it's good to add.
-			if *prevHash == tip.hash || tip.height == 0 {
+			if prevHash.IsEqual(tipHash) || tipHash == nil {
 				dcr.log.Debugf("New block %s (%d)", bestHash, block.Height)
 				addBlock(block, false)
 				continue
@@ -670,10 +670,10 @@ out:
 			// It is either a reorg, or the previous block is not the cached
 			// best block. Crawl blocks backwards until finding a mainchain
 			// block, flagging blocks from the cache as orphans along the way.
-			iHash := &tip.hash
+			iHash := tipHash
 			reorgHeight := int64(0)
 			for {
-				if *iHash == zeroHash {
+				if iHash == nil {
 					break
 				}
 				iBlock, err := dcr.node.GetBlockVerbose(ctx, iHash, false)
@@ -705,8 +705,8 @@ out:
 			if reorgHeight > 0 {
 				reorg = true
 				dcr.log.Infof("Tip change from %s (%d) to %s (%d) detected (reorg or just fast blocks).",
-					tip.hash, tip.height, bestHash, block.Height)
-				dcr.blockCache.reorg(reorgHeight)
+					tipHash, tipHeight, bestHash, block.Height)
+				dcr.blockCache.PurgeMainchainBlocks(reorgHeight)
 			}
 
 			// Now add the new block.
@@ -722,12 +722,9 @@ out:
 
 // blockInfo returns block information for the verbose transaction data. The
 // current tip hash is also returned as a convenience.
-func (dcr *Backend) blockInfo(ctx context.Context, verboseTx *chainjson.TxRawResult) (blockHeight uint32, blockHash chainhash.Hash, tipHash *chainhash.Hash, err error) {
-	blockHeight = uint32(verboseTx.BlockHeight)
-	tip := dcr.blockCache.tipHash()
-	if tip != zeroHash {
-		tipHash = &tip
-	}
+func (dcr *Backend) blockInfo(ctx context.Context, verboseTx *chainjson.TxRawResult) (blockHeight int64, blockHash chainhash.Hash, tipHash *chainhash.Hash, err error) {
+	blockHeight = verboseTx.BlockHeight
+	tipHash, _ = dcr.blockCache.Tip()
 	// Assumed to be valid while in mempool, so skip the validity check.
 	if verboseTx.Confirmations > 0 {
 		if blockHeight == 0 {
@@ -735,13 +732,13 @@ func (dcr *Backend) blockInfo(ctx context.Context, verboseTx *chainjson.TxRawRes
 				"non-zero confirmation count (%s has %d confirmations)", verboseTx.Txid, verboseTx.Confirmations)
 			return
 		}
-		var blk *dcrBlock
+		var blk *dexdcr.Block
 		blk, err = dcr.getBlockInfo(ctx, verboseTx.BlockHash)
 		if err != nil {
 			return
 		}
-		blockHeight = blk.height
-		blockHash = blk.hash
+		blockHeight = blk.Height
+		blockHash = *blk.Hash
 	}
 	return
 }
@@ -981,7 +978,7 @@ func determineTxTree(msgTx *wire.MsgTx) int8 {
 
 // Get the block information, checking the cache first. Same as
 // getDcrBlock, but takes a string argument.
-func (dcr *Backend) getBlockInfo(ctx context.Context, blockid string) (*dcrBlock, error) {
+func (dcr *Backend) getBlockInfo(ctx context.Context, blockid string) (*dexdcr.Block, error) {
 	blockHash, err := chainhash.NewHashFromStr(blockid)
 	if err != nil {
 		return nil, fmt.Errorf("unable to decode block hash from %s", blockid)
@@ -990,8 +987,8 @@ func (dcr *Backend) getBlockInfo(ctx context.Context, blockid string) (*dcrBlock
 }
 
 // Get the block information, checking the cache first.
-func (dcr *Backend) getDcrBlock(ctx context.Context, blockHash *chainhash.Hash) (*dcrBlock, error) {
-	cachedBlock, found := dcr.blockCache.block(blockHash)
+func (dcr *Backend) getDcrBlock(ctx context.Context, blockHash *chainhash.Hash) (*dexdcr.Block, error) {
+	cachedBlock, found := dcr.blockCache.Block(blockHash)
 	if found {
 		return cachedBlock, nil
 	}
@@ -999,16 +996,16 @@ func (dcr *Backend) getDcrBlock(ctx context.Context, blockHash *chainhash.Hash) 
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving block %s: %w", blockHash, translateRPCCancelErr(err))
 	}
-	return dcr.blockCache.add(blockVerbose)
+	return dcr.blockCache.Add(blockVerbose)
 }
 
 // Get the mainchain block at the given height, checking the cache first.
-func (dcr *Backend) getMainchainDcrBlock(ctx context.Context, height uint32) (*dcrBlock, error) {
-	cachedBlock, found := dcr.blockCache.atHeight(height)
+func (dcr *Backend) getMainchainDcrBlock(ctx context.Context, height int64) (*dexdcr.Block, error) {
+	cachedBlock, found := dcr.blockCache.BlockAt(height)
 	if found {
 		return cachedBlock, nil
 	}
-	hash, err := dcr.node.GetBlockHash(ctx, int64(height))
+	hash, err := dcr.node.GetBlockHash(ctx, height)
 	if err != nil {
 		// Likely not mined yet. Not an error.
 		return nil, nil
