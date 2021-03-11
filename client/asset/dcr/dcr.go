@@ -418,6 +418,9 @@ type ExchangeWallet struct {
 
 	findRedemptionMtx   sync.RWMutex
 	findRedemptionQueue map[outPoint]*findRedemptionReq
+
+	externalTxMtx sync.RWMutex
+	externalTxs   map[chainhash.Hash]*externalTx
 }
 
 type block struct {
@@ -525,6 +528,7 @@ func unconnectedWallet(cfg *asset.WalletConfig, dcrCfg *Config, chainParams *cha
 		tipChange:           cfg.TipChange,
 		fundingCoins:        make(map[outPoint]*fundingCoin),
 		findRedemptionQueue: make(map[outPoint]*findRedemptionReq),
+		externalTxs:         make(map[chainhash.Hash]*externalTx),
 		fallbackFeeRate:     fallbackFeesPerByte,
 		feeRateLimit:        feesLimitPerByte,
 		redeemConfTarget:    redeemConfTarget,
@@ -1647,6 +1651,10 @@ func (dcr *ExchangeWallet) AuditContract(coinID, contract, txData dex.Bytes) (*a
 			"expected %s, got %s", txHash, finalTxHash)
 	}
 
+	// Record this audit coin txout to easily get confirmations later
+	// using cfilters.
+	dcr.trackExternalTxOut(txHash, vout, contractTxOut.PkScript)
+
 	return &asset.AuditInfo{
 		Coin:       newOutput(txHash, vout, uint64(contractTxOut.Value), determineTxTree(contractTx)),
 		Contract:   contract,
@@ -2193,14 +2201,20 @@ func (dcr *ExchangeWallet) Confirmations(ctx context.Context, id dex.Bytes) (con
 		return uint32(txOut.Confirmations), false, nil
 	}
 	// Check wallet transactions.
+	// The only reason a wallet output will not be found by gettxout
+	// is if it is spent.
 	tx, err := dcr.node.GetTransaction(ctx, txHash)
-	if err != nil {
-		if isTxNotFoundErr(err) {
-			return 0, false, asset.CoinNotFoundError
-		}
+	if err == nil {
+		return uint32(tx.Confirmations), true, nil
+	}
+	if !isTxNotFoundErr(err) {
 		return 0, false, translateRPCCancelErr(err)
 	}
-	return uint32(tx.Confirmations), true, nil
+
+	// Attempt to find this tx's block if it is an external tx.
+	// Will return asset.CoinNotFoundError if the coin was not previously tracked.
+	// TODO: Don't do this for non-spv wallets.
+	return dcr.externalTxOutConfirmations(txHash, vout)
 }
 
 // addInputCoins adds inputs to the MsgTx to spend the specified outputs.
@@ -2819,6 +2833,35 @@ func (dcr *ExchangeWallet) getDcrBlock(blockHash *chainhash.Hash, includeTxs boo
 		return nil, fmt.Errorf("error retrieving block %s: %w", blockHash, translateRPCCancelErr(err))
 	}
 	return dcr.blockCache.Add(blockVerbose)
+}
+
+// isMainchainBlock returns true if the provided blockhash is the hash of a
+// mainchain block.
+// TODO: Use blockVerbose rpc and check confirmations??
+func (dcr *ExchangeWallet) isMainchainBlock(blockHash *chainhash.Hash) (*dexdcr.Block, bool, error) {
+	block, err := dcr.getDcrBlock(blockHash, false)
+	if err != nil {
+		return nil, false, err
+	}
+	mainchainHash, err := dcr.getBlockHash(block.Height)
+	if err != nil {
+		return nil, false, err
+	}
+	return block, mainchainHash.IsEqual(blockHash), nil
+}
+
+func (dcr *ExchangeWallet) mainChainAncestor(blockHash *chainhash.Hash) (*chainhash.Hash, error) {
+	blockVerbose, err := dcr.node.GetBlockVerbose(dcr.ctx, blockHash, false)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving block %s: %w", blockHash, translateRPCCancelErr(err))
+	}
+	if blockVerbose.Confirmations > -1 {
+		// Block is a mainchain block.
+		return blockHash, nil
+	}
+
+	mainChainAncestorHeight := blockVerbose.Height + blockVerbose.Confirmations
+	return dcr.getBlockHash(mainChainAncestorHeight)
 }
 
 // Get the block v2filter, checking the cache first.
